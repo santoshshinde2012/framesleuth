@@ -97,86 +97,86 @@ python -c "from framesleuth.config import get_settings; s = get_settings(); s.va
 python scripts/download_models.py
 ```
 
-This script currently **checks for** the expected local model files and reports
-what is missing; checksum verification is stubbed (placeholder SHA256) and it does
-**not** itself download weights or run `ollama pull`. Fetch the models via the
-engine you use:
+This script **pre-fetches the faster-whisper ASR model** (the only weight
+Framesleuth downloads itself) and then **checks that your VLM and coder servers
+are reachable**, printing the exact `ollama pull ...` command for anything that's
+missing. It does **not** download the vision/coder LLMs — those are served by your
+engine. Useful flags: `--skip-asr`, `--asr-model <size>`, `--strict` (exit non-zero
+if a prerequisite is missing, e.g. for CI).
+
+Fetch the LLMs via the engine you use:
 - VLM (llama.cpp): `llama-server -hf Qwen/Qwen3-VL-8B-Instruct-GGUF ...` (pulls on first run)
 - VLM (Ollama path): `ollama pull qwen2.5vl`
 - Coder (Ollama): `ollama pull qwen2.5-coder:7b`
-- Whisper: downloaded automatically by `faster-whisper` on first transcription
+- Whisper: pre-fetched by this script, or downloaded automatically by `faster-whisper`
+  on the first transcription
 
 ### What gets downloaded
 
-| Model | Size | Purpose | Local path |
-|---|---|---|---|
-| Qwen3-VL-8B-Instruct-GGUF | ~8GB | Frame understanding | `~/.cache/huggingface/` |
-| Qwen3-VL-8B-mmproj-fp16.gguf | ~2GB | Vision encoder | `~/.cache/huggingface/` |
-| Whisper | ~1GB | Speech-to-text | `~/.cache/whisper/` |
-| Qwen2.5-Coder:7b | ~5GB | Code fixing | Ollama blob store |
+Default (Ollama) — pulled automatically by `docker compose up`, or via `ollama pull`:
 
-**Total: ~16-20GB**
+| Model | Size | Purpose | Where |
+|---|---|---|---|
+| `qwen2.5vl` | ~6GB | Frame understanding (vision) | Ollama store |
+| `qwen2.5-coder:7b` | ~5GB | Code fixing (coder) | Ollama store |
+| faster-whisper (`small`) | ~0.5GB | Speech-to-text | `~/.cache/huggingface/` |
+
+**Total: ~11–12GB.** Alternative (llama.cpp): `Qwen3-VL-8B-Instruct-GGUF` (~8GB) +
+its `mmproj` (~2GB) under `~/.cache/huggingface/`, pulled on first `llama-server` run.
 
 ---
 
 ## Starting services
 
-### Option 0: Vision via Ollama (lightest — no llama.cpp, no GGUF download)
-
-The pipeline is engine-agnostic: the VLM only needs an OpenAI-compatible
-`/v1/chat/completions` endpoint that accepts images. Ollama provides that, so you
-can skip `llama-server` and the ~20 GB Qwen3-VL GGUF entirely:
+### Option A: Docker Compose — one command (recommended)
 
 ```bash
-ollama pull qwen2.5vl            # ~6 GB vision model (or qwen2.5vl:3b, ~3 GB)
+docker compose up          # or: ./scripts/dev_up.sh  (run it, don't `source` it)
 ```
 
-Point the backend at Ollama in `.env`:
+This brings up three services with **no manual steps**:
 
-```env
-VLM_URL=http://127.0.0.1:11434
-VLM_MODEL=qwen2.5vl
-```
-
-Then `framesleuth-api`. `GET /v1/healthz` should report `vlm: ready`, and runs
-will populate `keyframes/` and produce real frame OCR/captions (`analysis_quality.level: full`).
-**Without a vision model, `understand` degrades** and — unless the recording
-carries browser sidecars — the bundle has nothing to summarize.
-
-### Option A: All-in-one (local-default)
+1. `ollama` — the local model server (healthchecked).
+2. `ollama-init` — a one-shot container that pulls `qwen2.5vl` + `qwen2.5-coder:7b`
+   (~11 GB on first run) into a named volume, then exits.
+3. `backend` — the Framesleuth API on `http://127.0.0.1:8010`, started only once
+   the models are ready (`depends_on: service_completed_successfully`).
 
 ```bash
-# Terminal 1: VLM server (llama.cpp)
-llama-server -hf Qwen/Qwen3-VL-8B-Instruct-GGUF \
-  --mmproj ~/.cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-GGUF/snapshots/*/qwen3-vl-mmproj.gguf \
-  --n-gpu-layers 99 -c 32768 --port 8080
+curl -s http://127.0.0.1:8010/v1/healthz | python -m json.tool   # status: healthy
+docker compose logs -f                  # watch the model download / startup
+docker compose down --remove-orphans    # stop  (add -v to also delete model volumes)
+```
 
-# Terminal 2: Coder server (Ollama)
-OLLAMA_KEEP_ALIVE=-1 ollama serve
-# In separate shell: ollama pull qwen2.5-coder:7b
+The compose Ollama runs on the internal network only (its port is **not**
+published), so it won't collide with a native Ollama on `:11434`. The only host
+port is the API on `:8010`. If you already run Ollama natively with the models,
+prefer **Option B** below — it reuses them instead of downloading a second copy.
 
-# Terminal 3: Framesleuth backend
-framesleuth-api
+It's **CPU-only** under Docker (incl. Docker on macOS, which can't use the Mac
+GPU), so the vision model is slow there — for speed on macOS use **Option B**
+(native Ollama). For an **NVIDIA GPU** on Linux, uncomment the `deploy:` block on
+the `ollama` service in `docker-compose.yml`.
 
-# Terminal 4: MCP server
+### Option B: Run it directly (fastest on macOS, best for development)
+
+```bash
+# Models — native Ollama uses the Mac GPU
+ollama serve &                                    # skip if already running
+ollama pull qwen2.5vl && ollama pull qwen2.5-coder:7b
+
+# Backend — point the VLM at Ollama (in .env or inline) and start the API
+uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
+VLM_URL=http://127.0.0.1:11434 VLM_MODEL=qwen2.5vl framesleuth-api
+
+# MCP server (launched by your editor; or run standalone over stdio)
 framesleuth-mcp
 ```
 
-### Option B: Docker Compose (all services)
-
-```bash
-docker compose --profile local-default up
-# or
-docker compose --profile vllm up  # for server profile
-```
-
-### Option C: Helper script
-
-```bash
-./scripts/dev_up.sh   # run it — do NOT `source` it (sourcing can close your shell)
-# Starts all services in the background (detached). Stop with:
-#   docker compose --profile local-default down
-```
+> The vision model is engine-agnostic — it only needs an OpenAI-compatible
+> `/v1/chat/completions` endpoint that accepts images, which Ollama provides. Set
+> `VLM_URL`/`VLM_MODEL` to point at it. Without a reachable VLM the `understand`
+> stage degrades and the bundle relies on browser sidecars.
 
 ---
 
@@ -198,9 +198,18 @@ Expected response (all services up):
     "storage": { "name": "storage", "status": "ready", "latency_ms": null, "error": null }
   },
   "queue_depth": 0,
-  "timestamp": "2026-06-22T08:25:19.936358+00:00"
+  "timestamp": "2026-06-22T08:25:19.936358+00:00",
+  "render": {
+    "playwright": true, "playwright_version": "1.49.0", "chromium": true,
+    "ffmpeg": true, "python": "/path/to/.venv/bin/python", "ready": true, "hint": null
+  }
 }
 ```
+
+The `render` block reports readiness of the optional HTML→video capability in the
+running process. When `ready` is `false`, `hint` says what to install and `python`
+shows which interpreter the server is using (see the HTML→video troubleshooting
+entry below).
 
 Without the model servers running you'll instead see `"status": "unhealthy"`
 with `vlm`/`coder` reporting `"status": "unavailable"` and `storage: ready`.
@@ -210,11 +219,11 @@ resulting bundle's `analysis_quality` records what was skipped.
 ### Model servers
 
 ```bash
-# VLM (llama.cpp)
-curl http://127.0.0.1:8080/v1/models
+# Default: vision + coder both on Ollama
+curl http://127.0.0.1:11434/api/tags        # should list qwen2.5vl and qwen2.5-coder
 
-# Coder (Ollama)
-curl http://127.0.0.1:11434/api/tags
+# Alternative: llama.cpp VLM (only if you use VLM_URL=http://127.0.0.1:8080)
+curl http://127.0.0.1:8080/v1/models
 ```
 
 ### MCP server
@@ -227,6 +236,43 @@ tail -f .framesleuth-mcp.log
 ---
 
 ## Common issues
+
+> **First, run the doctor.** `python3 scripts/doctor.py` checks your whole local
+> setup (venv, PATH, package import, ffmpeg/render prerequisites, backend + model
+> servers) and prints a one-line fix for each problem. It uses only the standard
+> library, so it runs with a plain `python3` even when the virtualenv is broken.
+
+### Issue: `command not found: framesleuth-api` / `uv pip install` can't find the interpreter
+
+**Cause:** Your shell has a virtualenv "active" (the `(framesleuth)` prefix) whose
+directory was deleted or moved — so the console scripts and `uv` point at a Python
+that no longer exists. (`uv` says: *Python interpreter not found at …/.venv/bin/python3*.)
+
+**Fix:** drop the dead venv and recreate it **in the framesleuth directory**:
+```bash
+deactivate 2>/dev/null || true
+unset VIRTUAL_ENV
+cd /path/to/framesleuth          # the agent repo — not the website folder
+uv venv && source .venv/bin/activate
+uv pip install -e ".[dev]"       # add ,render for HTML→video: ".[dev,render]"
+framesleuth-api                  # now on PATH
+```
+
+### Issue: `docker compose up` → "Bind for 0.0.0.0:11434 failed: port is already allocated" or "orphan containers"
+
+**Cause:** something else already owns a port (commonly a **native Ollama** on
+`:11434`, or **leftover containers from an older version** of this compose file).
+
+**Fix:** the current compose no longer publishes Ollama's port, so update + clean up:
+```bash
+git pull                                   # get the current docker-compose.yml
+docker compose down --remove-orphans       # remove old/renamed containers
+docker compose up -d --remove-orphans
+```
+If you already run Ollama natively with the models, skip Docker entirely and use
+**Option B** (run it directly) — it reuses your existing Ollama. The only host
+port the stack needs is the API on `:8010`; if `:8010` is taken, change the left
+side of `"8010:8000"` in `docker-compose.yml`.
 
 ### Issue: "VLM server not responding (503)"
 
@@ -285,6 +331,31 @@ sudo apt install ffmpeg  # Linux
 # Verify
 ffmpeg -version
 ```
+
+### Issue: HTML→video "Playwright is not installed" (or `503` from `/v1/render-html`)
+
+**Why optional?** Playwright is an optional `[render]` extra — it pulls a ~150 MB
+Chromium browser the core pipeline doesn't need, so it isn't a core dependency.
+The error means the extra isn't in **the process the server runs** — usually the
+server is a different environment than the one you installed into, or it wasn't
+restarted. (Docker bundles it already; this is the direct path.)
+
+**Fix:**
+```bash
+# Install the extra into the SAME environment the server runs in:
+uv pip install -e ".[render]"        # or ".[all]" = dev + render
+# ffmpeg must also be on PATH (see above)
+
+# Restart framesleuth-api. Chromium downloads automatically on the first render —
+# no separate `playwright install chromium` needed. Verify in the running process:
+curl -s http://127.0.0.1:8010/v1/healthz | python -m json.tool
+# → "render": {"playwright": true, "ffmpeg": true, ...}  (chromium flips true after first render)
+```
+
+If `render.playwright` is still `false`, the server is the wrong environment —
+check `render.python` (the interpreter it actually uses) and reinstall there. To
+provision the browser yourself instead of auto-download, set
+`FRAMESLEUTH_AUTO_INSTALL_BROWSER=0` and run `playwright install chromium`.
 
 ---
 

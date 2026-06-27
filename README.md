@@ -11,9 +11,9 @@ frame-by-frame, and produces a structured **Bug Context Bundle**. It is **MCP-re
 any MCP client — a VS Code agent, another coding agent, or a custom system — can drive the
 analysis and consume the result to fix the bug directly.
 
-Capture happens in a separate Chrome extension,
-[inkwell](https://github.com/santoshshinde2012/inkwell), which records the bug and posts the
-video + sidecars to this agent's local API. This repo is the analysis agent only.
+Capture happens outside this repo: any screen recording works, or a browser capture
+extension can record the bug and post the video + sidecars to this agent's local API.
+This repo is the analysis agent only.
 
 Everything runs locally. Nothing leaves your machine.
 
@@ -23,96 +23,116 @@ Everything runs locally. Nothing leaves your machine.
 > [Use with VS Code & Claude (MCP)](docs/use-with-vscode-and-claude.md) — connect
 > the bundled MCP server and go from a recording to a grounded fix.
 
-### Try it end-to-end in 2 minutes (no models required)
+### Fastest: one command with Docker
 
-Framesleuth **degrades gracefully**: with no vision model or ffmpeg installed, it
-still produces a Bug Context Bundle from the browser sidecars (console errors,
-failed network requests, clicks). This is enough to record a bug in Chrome and
-get a structured report.
+Everything — the model server, the models, and the API — comes up with a single
+command. No Python, no virtualenv, no manual model setup.
 
 ```bash
-uv venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
-
-# 1. Start the backend (binds 127.0.0.1:8010 from config; 8000 is left for inkwell)
-framesleuth-api          # or: uvicorn framesleuth.service.api:app --port 8010
-
-# 2. Install the inkwell Chrome extension (separate repo) to capture a bug:
-#    https://github.com/santoshshinde2012/inkwell
-#    Record → reproduce the bug → Stop. It posts the video + sidecars here.
-
-# 3. Or drive the agent directly with your own video file — over the HTTP API
-#    (see the Postman collection / runbook) or the videobug MCP server
-#    (see docs/use-with-vscode-and-claude.md).
+git clone https://github.com/santoshshinde2012/framesleuth.git
+cd framesleuth
+docker compose up            # or: ./scripts/dev_up.sh
 ```
 
-Check `GET /v1/healthz`: `status` is *healthy* when the vision + coder models
-are up, or *unhealthy* when running sidecar-only (with `vlm`/`coder` reported
-`unavailable` and `storage` `ready`). Add the model servers (below) to enable
-frame-level OCR/visual understanding.
-
-### Prerequisites (full pipeline)
-- Python 3.11+
-- A local VLM server (llama.cpp `:8080` or Ollama `:11434`) for frame understanding
-- 8GB+ RAM (for models)
-
-> ffmpeg is **not** a separate prerequisite — frame/audio decoding uses PyAV,
-> which bundles its own ffmpeg libraries. (`ffprobe`, if present, is used
-> opportunistically to detect whether a recording has an audio stream.)
-
-### Setup
+The **first** run automatically pulls the vision + coder models (`qwen2.5vl` and
+`qwen2.5-coder:7b`, ~11 GB total) into a Docker volume, then starts the backend on
+`http://127.0.0.1:8010`. Subsequent runs are instant. It's ready when the health
+check reports `healthy`:
 
 ```bash
-# Clone and navigate
+curl -s http://127.0.0.1:8010/v1/healthz | python -m json.tool   # "status": "healthy"
+```
+
+That's the whole setup — **run your first analysis** (below), or connect the MCP
+server in your editor ([VS Code & Claude](docs/use-with-vscode-and-claude.md)).
+
+```bash
+docker compose logs -f                  # follow progress / model download
+docker compose down --remove-orphans    # stop  (add -v to also delete model volumes)
+```
+
+The stack runs its **own** Ollama on the internal Docker network only (its port is
+not published), so it never clashes with a native Ollama you may already run on
+`:11434` — the only host port is the API on `:8010`.
+
+> **Already run Ollama natively (with the models)?** The Docker stack's Ollama is
+> separate and would re-download them. Skip Docker and use the **direct path**
+> below instead — it reuses your existing Ollama and is faster (especially on
+> macOS, where Docker can't use the GPU).
+>
+> **macOS / no GPU:** Docker runs the models on **CPU**, so the vision model is
+> slow. **NVIDIA GPU on Linux:** uncomment the `deploy:` block on the `ollama`
+> service in `docker-compose.yml` for acceleration.
+
+### Run your first analysis (curl)
+
+Once the API reports healthy (either setup path), go from a recording to a Bug
+Context Bundle in three calls — analysis is async (submit → poll → read):
+
+```bash
+# 1. Submit any screen recording (mp4/webm). Returns 202 { job_id, ... }
+JOB=$(curl -s -F "video=@bug.mp4" http://127.0.0.1:8010/v1/analyze \
+  | python -c "import sys, json; print(json.load(sys.stdin)['job_id'])")
+
+# 2. Poll until state is "done" (queued → running → done)
+curl -s "http://127.0.0.1:8010/v1/jobs/$JOB" | python -m json.tool
+
+# 3. Read the Bug Context Bundle
+curl -s "http://127.0.0.1:8010/v1/report/$JOB" | python -m json.tool
+```
+
+Optional form fields on step 1: `-F intent="why does save hang?"`, `-F skill=bug_report`,
+`-F action=fix` (`GET /v1/skills` and `/v1/actions` list the choices). Prefer a UI?
+Import the [Postman collection](postman/README.md) — it chains these calls for you.
+
+### Run it directly (no Docker — fastest on macOS, best for development)
+
+**Prerequisites:** Python 3.11+, [`uv`](https://docs.astral.sh/uv/), 8 GB+ RAM, and
+a local model server. ffmpeg is **not** required (PyAV bundles its own; `ffprobe`,
+if present, is used opportunistically to detect an audio stream).
+
+```bash
 git clone https://github.com/santoshshinde2012/framesleuth.git
 cd framesleuth
 
-# Create environment and install
+# 1. Models — native Ollama (uses the Mac GPU) is the quick path
+ollama serve &                                  # skip if already running
+ollama pull qwen2.5vl && ollama pull qwen2.5-coder:7b
+
+# 2. Install
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
+python scripts/download_models.py               # optional: pre-warm ASR + check servers
 
-# Download models (one-time, ~10-20GB)
-python scripts/download_models.py
+# 3. Configure + start the API (binds 127.0.0.1:8010)
+cp .env.example .env                            # already defaults to the Ollama path above
+framesleuth-api                                 # or: uvicorn framesleuth.service.api:app --port 8010
 
-# Copy environment template
-cp .env.example .env
-# Edit .env to match your setup (see runbook.md for details)
-
-# Start services (Docker Compose). Run it — do NOT `source` it.
-./scripts/dev_up.sh
-# No Docker? Skip this and use the Ollama path in "Start & stop the stack" below.
-```
-
-### Start & stop the stack (Ollama — verified working)
-
-`scripts/dev_up.sh` uses Docker Compose. If you don't run Docker, use the
-engine-agnostic Ollama path below. `.env.example` ships the llama.cpp defaults
-(`VLM_URL=http://127.0.0.1:8080`, `VLM_MODEL=Qwen/Qwen3-VL-8B-Instruct-GGUF`); for
-the Ollama path, copy it to `.env` and set `VLM_URL=http://127.0.0.1:11434` and
-`VLM_MODEL=qwen2.5vl`. The vision model is the
-piece that powers frame-level understanding; without it reachable, analyses come
-back **degraded** (no on-screen evidence read).
-
-**Start**
-
-```bash
-# 1. Vision model — start Ollama and pull the VLM once (~6 GB; or qwen2.5vl:3b)
-ollama serve &                       # skip if Ollama is already running
-ollama pull qwen2.5vl
-
-# 2. Backend — run from the repo root so it loads .env (binds 127.0.0.1:8010)
-source .venv/bin/activate
-framesleuth-api                      # or: uvicorn framesleuth.service.api:app --port 8010
-
-# 3. Verify BEFORE recording — both should report ready
+# 4. Verify
 curl -s http://127.0.0.1:11434/v1/models | grep -q qwen2.5vl && echo "VLM ready"
-curl -s http://127.0.0.1:8010/v1/healthz   # expect status: healthy, vlm: ready
+curl -s http://127.0.0.1:8010/v1/healthz | python -m json.tool   # status: healthy, vlm: ready
 ```
 
 When `/v1/healthz` shows `vlm: ready`, recordings analyze with a real
-classification (`analysis_quality.level` = `full`/`partial`). If the VLM is down,
-you get the degraded "evidence was thin" report instead. Record **with narration**
-so the audio transcript (`asr`) stage contributes too.
+classification (`analysis_quality.level` = `full`/`partial`). With no vision model
+reachable, Framesleuth **degrades gracefully** — it still produces a valid Bug
+Context Bundle from the browser sidecars (console errors, failed requests, clicks)
+and records what was thin in `analysis_quality`. Record **with narration** so the
+audio transcript (`asr`) stage contributes too.
+
+> **Something not working?** Run the setup doctor — it works with a plain
+> `python3` even when your virtualenv is broken, and prints a one-line fix for
+> each problem (stale/missing venv, `framesleuth-api` not on PATH, ffmpeg/render
+> prerequisites, backend or model server not reachable, wrong `VLM_URL`):
+>
+> ```bash
+> python3 scripts/doctor.py
+> ```
+>
+> Common gotcha: `command not found: framesleuth-api` or a `uv pip install` error
+> about a missing interpreter means your active venv was deleted/moved. Fix it
+> from the **framesleuth** directory:
+> `deactivate; unset VIRTUAL_ENV; uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"`.
 
 **Stop**
 
@@ -133,7 +153,7 @@ Local Analysis Service (pipeline)
     ├─ Preprocess (PyAV: duration/fps/dims)
     ├─ Transcript (faster-whisper)
     ├─ Keyframes (visual-delta change scoring)
-    ├─ Understanding (Qwen3-VL)
+    ├─ Understanding (local vision model — Qwen2.5-VL by default)
     ├─ Fusion + Classification
     ├─ Extraction → Bug Context Bundle
     ├─ Summarize (skill/system-prompt-driven)
@@ -142,12 +162,12 @@ Local Analysis Service (pipeline)
 Bug Context Bundle
     ↓
 MCP server + local HTTP API
-    └─ consumed by any MCP client (VS Code agent, other agents, inkwell extension)
+    └─ consumed by any MCP client (VS Code agent, other agents, capture extension)
 ```
 
 ## Features
 
-- **Frame-by-frame understanding** using Qwen3-VL vision model
+- **Frame-by-frame understanding** using a local vision model (Qwen2.5-VL by default; engine-agnostic)
 - **Automatic keyframe selection** via frame-to-frame visual-delta change scoring
 - **Error detection and extraction** from console, OCR, and UI state
 - **Redaction-first design** — sensitive data (passwords, tokens) redacted before models see it
@@ -159,6 +179,44 @@ MCP server + local HTTP API
   classification), plus a machine-readable `suggested_actions` menu and on-demand
   artifact renderers (markdown / GitHub issue / test plan)
 - **Resilient** — handles no-audio videos, weak local models, low-confidence cases
+- **HTML → video** — render a self-contained HTML animation (CSS/JS/canvas) to
+  MP4, GIF, or WebM via the `render_html_video` MCP tool or `POST /v1/render-html`.
+  **Included by default in the Docker image** (real headless Chromium + ffmpeg, the
+  highest-fidelity path). For the direct (non-Docker) path, add the `render` extra
+  (see below); returns `503` with an actionable message when unavailable.
+
+### Enable & troubleshoot HTML → video
+
+> Using **Docker** (`docker compose up`)? HTML→video already works — the image bakes
+> in Playwright + Chromium + ffmpeg. (Build with `--build-arg INSTALL_RENDER=false`
+> for a slimmer image without it.) The steps below are for the **direct** path.
+
+**Why is Playwright not in the core install?** It's an **optional `[render]`
+extra**, not a core dependency, because it pulls a ~150 MB headless-Chromium
+browser the core video→bundle pipeline never needs — the standard way to ship a
+heavy, feature-specific dependency. (`av`, `opencv`, `faster-whisper` are core
+because the pipeline requires them.) Install the extra and you're done — **the
+Chromium build downloads automatically on your first render**, so there's no
+separate `playwright install chromium` step:
+
+```bash
+# In the same environment the server runs in:
+uv pip install -e ".[render]"        # or ".[all]" = dev + render
+# ffmpeg must be on PATH (brew install ffmpeg / apt-get install ffmpeg)
+
+# Restart framesleuth-api, then verify (Chromium fetches itself on first render):
+curl -s http://127.0.0.1:8010/v1/healthz | python -m json.tool
+# → "render": {"playwright": true, "chromium": <true after first render>, "ffmpeg": true}
+```
+
+Set `FRAMESLEUTH_AUTO_INSTALL_BROWSER=0` to disable the auto-download and run
+`playwright install chromium` yourself (e.g. in a locked-down environment).
+
+If `render.ready` is `false`, the `render.hint` field tells you exactly what's
+missing. The most common cause of *"Playwright is not installed"* despite
+following the steps is that `framesleuth-api` is running from a **different
+environment** than the one you installed into (the `render.python` field shows
+which interpreter the server uses) — or the server simply wasn't restarted.
 
 ## Project structure
 
@@ -174,13 +232,13 @@ framesleuth/
 │   ├── actions.py           # Action modes (fix/explain/triage/...) + suggested-actions menu
 │   ├── render.py            # Artifact renderers (markdown / GitHub issue / test plan)
 │   ├── clients/             # VLM, coder HTTP clients (OpenAI-compatible)
-│   ├── pipeline/            # preprocess, asr, scenes, understand, fusion, classify, bug_extract, redact, summarize, sidecars, grounding
+│   ├── pipeline/            # preprocess, asr, scenes, understand, fusion, classify, bug_extract, redact, summarize, sidecars, grounding, html_render
 │   ├── orchestrator/        # graph.py — linear async stage pipeline
 │   ├── jobs/                # store.py — SQLite job state + bundle index
 │   ├── service/             # FastAPI HTTP endpoints
 │   └── mcp_server/          # videobug MCP server (VS Code + any MCP client)
 ├── tests/                   # pytest tests + fixtures
-├── scripts/                 # download_models.py, dev_up.sh
+├── scripts/                 # doctor.py (setup check), download_models.py, dev_up.sh
 ├── postman/                 # HTTP API collection + environment
 ├── docs/                    # capabilities, use-with-vscode-and-claude, web-integration
 └── pyproject.toml           # Dependencies and tool config
@@ -219,14 +277,14 @@ Apache-2.0
 
 ---
 
-## Capture client (inkwell)
+## Capture client
 
-Bug capture lives in a separate Chrome extension,
-[inkwell](https://github.com/santoshshinde2012/inkwell). It records the bug, collects
-browser sidecars (console errors, failed requests, clicks), and posts the video + sidecars
+Bug capture lives outside this repo. Any screen recording works — drive the agent directly
+with your own video file. A browser capture extension can also record the bug, collect
+browser sidecars (console errors, failed requests, clicks), and post the video + sidecars
 to this agent's local API. The agent's CORS is already scoped to `chrome-extension://`
-origins and the loopback bind, so inkwell works against a locally running backend with no
-extra setup.
+origins and the loopback bind, so an extension works against a locally running backend with
+no extra setup.
 
 **Status:** Backend + pipeline + MCP server completed.  
 **Questions?** Open an issue or check [runbook.md](runbook.md) for common questions.

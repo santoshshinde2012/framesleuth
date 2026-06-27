@@ -145,6 +145,16 @@ The bundle the consumer reads. Key fields:
 See **[capabilities.md](capabilities.md)** for the complete input/output reference and
 every supported skill, action, renderer, endpoint, and MCP tool.
 
+### Also available — HTML → video (optional)
+
+Separate from the analyze loop, the backend can render a self-contained HTML
+animation (CSS/JS/canvas) to a clip: `POST /v1/render-html` with
+`{html, format: mp4|gif|webm, duration_s, fps, width, height}` returns the encoded
+file. It's an **optional capability** (needs the `render` extra + `ffmpeg`) and
+returns `503` when unavailable — gate your UI on `GET /v1/healthz` → `render.ready`.
+Proxy it the same way as the rest (browser → your backend → Framesleuth, loopback
+only); binary responses pass straight through.
+
 ---
 
 ## 3. The agentic approach

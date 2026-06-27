@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
+import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,6 +16,7 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from framesleuth.clients.health import get_health_status
 from framesleuth.clients.vlm import VLMClient
@@ -109,9 +112,7 @@ class AppState:
                             "capture_options.json"
                         ).write_text(capture_options, encoding="utf-8")
             except FramesleutheException as exc:
-                await self.store.update_job(
-                    job_id, state=JobState.FAILED, error_json=exc.to_dict()
-                )
+                await self.store.update_job(job_id, state=JobState.FAILED, error_json=exc.to_dict())
             except Exception:  # orchestrator already logged + marked FAILED
                 logger.exception("Background analysis failed for job %s", job_id)
             finally:
@@ -161,7 +162,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:  # noqa: C901
             bundle_dir=str(settings.BUNDLE_DIR),
             queue_depth=0,
         )
-        return health.model_dump()
+        payload = health.model_dump()
+        # Surface optional HTML→video readiness so it's diagnosable in the running
+        # process (cheap, no browser launch).
+        from framesleuth.pipeline.html_render import render_availability
+
+        payload["render"] = render_availability()
+        return payload
 
     @app.get("/v1/skills")
     async def skills() -> dict[str, object]:
@@ -327,6 +334,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:  # noqa: C901
                     detail={"error": "GIF encoding failed", "code": "gif_failed"},
                 )
         return FileResponse(gif_path, media_type="image/gif")
+
+    @app.post("/v1/render-html")
+    async def render_html_endpoint(payload: dict[str, Any]) -> FileResponse:
+        """Render an HTML document (CSS / JS / canvas animation) to a clip.
+
+        Body: ``{"html": "...", "format": "mp4|gif|webm", "duration_s": 5,
+        "fps": 30, "width": 1280, "height": 720}``. Synchronous — returns the
+        encoded file. Requires the optional ``render`` extra (Playwright) and
+        ``ffmpeg``; returns ``503`` with an actionable message when unavailable.
+        """
+        from framesleuth.pipeline.html_render import (
+            HtmlRenderError,
+            RenderOptions,
+            render_html,
+        )
+
+        html = payload.get("html")
+        if not isinstance(html, str) or not html.strip():
+            raise HTTPException(
+                status_code=400, detail={"error": "Missing 'html'", "code": "missing_html"}
+            )
+        try:
+            options = RenderOptions.normalized(
+                fmt=str(payload.get("format", "mp4")),
+                duration_s=float(payload.get("duration_s", 5.0)),
+                fps=int(payload.get("fps", 30)),
+                width=int(payload.get("width", 1280)),
+                height=int(payload.get("height", 720)),
+            )
+        except (HtmlRenderError, ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400, detail={"error": str(exc), "code": "bad_options"}
+            ) from exc
+
+        out_dir = Path(tempfile.mkdtemp(prefix="fs-render-"))
+        try:
+            path = await render_html(html, options, out_dir)
+        except HtmlRenderError as exc:
+            shutil.rmtree(out_dir, ignore_errors=True)
+            raise HTTPException(
+                status_code=503, detail={"error": str(exc), "code": "render_unavailable"}
+            ) from exc
+
+        media = {"mp4": "video/mp4", "gif": "image/gif", "webm": "video/webm"}[options.fmt]
+        return FileResponse(
+            path,
+            media_type=media,
+            filename=f"animation.{options.fmt}",
+            background=BackgroundTask(shutil.rmtree, out_dir, ignore_errors=True),
+        )
 
     return app
 

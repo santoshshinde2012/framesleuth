@@ -1,6 +1,6 @@
 """Encode an animated GIF preview from a stored recording.
 
-A GIF is the most portable way for a client (the inkwell extension, a chat
+A GIF is the most portable way for a client (a capture extension, a chat
 surface, a GitHub issue) to embed a short looping preview of the bug without
 shipping a video player. Like the rest of the media layer this uses PyAV only —
 which bundles its own ffmpeg libraries, so no system ``ffmpeg`` binary or extra

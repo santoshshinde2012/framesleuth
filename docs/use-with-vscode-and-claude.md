@@ -113,10 +113,11 @@ asyncio.run(main())
 PY
 ```
 
-Expected: 13 tools (`analyze_video`, `list_skills`, `list_actions`,
+Expected: 14 tools (`analyze_video`, `list_skills`, `list_actions`,
 `list_bug_reports`, `get_bug_report`, `get_suggested_actions`, `get_repro_steps`,
 `get_error_evidence`, `get_timeline`, `get_keyframe_image`, `get_video_gif`,
-`locate_in_code`, `render`), 4 resources, and the `fix_from_video` prompt.
+`locate_in_code`, `render`, `render_html_video`), 4 resources, and the
+`fix_from_video` prompt.
 Running `framesleuth-mcp`
 directly starts the stdio server (it waits for
 a client and produces no output — Ctrl-C to exit; that silence is success).
@@ -274,7 +275,7 @@ A concrete pass you can run top-to-bottom to confirm Copilot can analyze a video
    ollama pull qwen2.5vl
    ```
 2. **Install + smoke-test the server** (see §0). `which framesleuth-mcp` resolves
-   and the smoke test prints 13 tools.
+   and the smoke test prints 14 tools.
 3. **Start the server in VS Code.** `code .`, open `.vscode/mcp.json`, click
    **Start** above `videobug` (or **MCP: List Servers → Start**). The code lens
    should flip to **Running**.

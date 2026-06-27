@@ -1,97 +1,95 @@
-version: "3.8"
+# Framesleuth — one-command local stack.
+#
+#   docker compose up        # first run pulls the models (~11 GB) automatically
+#   curl http://127.0.0.1:8010/v1/healthz
+#
+# What comes up, with no manual steps:
+#   1. ollama        — local model server (OpenAI-compatible).
+#   2. ollama-init   — one-shot: pulls the vision + coder models, then exits.
+#   3. backend       — Framesleuth API on http://127.0.0.1:8010, started only
+#                      once the models are ready.
+#
+# Everything runs locally; nothing leaves your machine. On a CPU-only host (incl.
+# Docker on macOS, which can't use the Mac GPU) the vision model is slow but
+# works — for speed on macOS use the native Ollama app instead (see the README).
+# NVIDIA GPU: uncomment the `deploy:` block on the `ollama` service.
+#
+# Note: this Ollama runs ONLY on the internal compose network (its port is not
+# published to the host), so it never clashes with a native Ollama you may
+# already run on :11434. The only host port published is the API on :8010.
 
 services:
-  llama-vlm:
-    image: ghcr.io/ggml-org/llama.cpp:latest
-    container_name: framesleuth-vlm
-    profiles:
-      - local-default
-      - local-onestack
-      - server
-    command: |
-      llama-server
-      -hf Qwen/Qwen3-VL-8B-Instruct-GGUF
-      --mmproj ~/.cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-GGUF/snapshots/*/qwen3-vl-mmproj.gguf
-      --n-gpu-layers 99
-      -c 32768
-      --parallel 2
-      --port 8080
-    ports:
-      - "8080:8080"
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-    restart: unless-stopped
-
-  ollama-coder:
+  ollama:
     image: ollama/ollama:latest
-    container_name: framesleuth-coder
-    profiles:
-      - local-default
-    ports:
-      - "11434:11434"
-    environment:
-      - OLLAMA_KEEP_ALIVE=-1
-      - OLLAMA_NUM_PARALLEL=2
+    container_name: framesleuth-ollama
+    # Internal only — the backend reaches it at http://ollama:11434 over the
+    # compose network. To inspect it from the host, add a mapping on a FREE port,
+    # e.g.  ports: ["11435:11434"]  (avoid 11434 if native Ollama uses it).
+    expose:
+      - "11434"
     volumes:
       - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 40 # up to ~3 min for the server to come up
+      start_period: 10s
     restart: unless-stopped
+    # --- NVIDIA GPU (Linux + nvidia-container-toolkit): uncomment for speed ---
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
-  llama-coder:
-    image: ghcr.io/ggml-org/llama.cpp:latest
-    container_name: framesleuth-coder-llama
-    profiles:
-      - local-onestack
-    command: |
-      llama-server
-      -hf Qwen/Qwen2.5-Coder-7B-Instruct-GGUF
-      -c 16384
-      --parallel 2
-      --port 8081
-    ports:
-      - "8081:8081"
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-    restart: unless-stopped
-
-  framesleuth-backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: framesleuth-backend
-    ports:
-      - "8010:8000"
-    environment:
-      - ENGINE_PROFILE=local-default
-      - VLM_URL=http://llama-vlm:8080
-      - CODER_URL=http://ollama-coder:11434
-      - LOG_LEVEL=INFO
-      - BACKEND_HOST=0.0.0.0
-    volumes:
-      - ./bug-reports:/app/bug-reports
-      - ~/.cache/whisper:/root/.cache/whisper
+  # One-shot: pulls the models into the shared ollama volume, then exits 0.
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: framesleuth-ollama-init
     depends_on:
-      - llama-vlm
-    restart: unless-stopped
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Pulling models (first run downloads ~11 GB)…"
+        ollama pull qwen2.5vl
+        ollama pull qwen2.5-coder:7b
+        echo "Models ready."
+    restart: "no"
 
-  framesleuth-mcp:
+  backend:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        CMD: mcp
-    container_name: framesleuth-mcp
-    environment:
-      - LOG_LEVEL=INFO
+    image: framesleuth-backend:latest
+    pull_policy: build # locally built — don't try to pull from a registry
+    container_name: framesleuth-backend
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
     ports:
-      - "3001:3001"
+      - "8010:8000" # host 8010 → container 8000
+    environment:
+      - BACKEND_HOST=0.0.0.0
+      - LOG_LEVEL=INFO
+      # Vision + coder both served by the local Ollama container.
+      - VLM_URL=http://ollama:11434
+      - VLM_MODEL=qwen2.5vl
+      - CODER_URL=http://ollama:11434
+      - CODER_MODEL=qwen2.5-coder:7b
     volumes:
-      - ./bug-reports:/app/bug-reports
+      - ./bug-reports:/app/bug-reports # analysis output persists on the host
+      - hf_cache:/root/.cache/huggingface # faster-whisper cache, reused across runs
     restart: unless-stopped
 
 volumes:
   ollama_data:
+    driver: local
+  hf_cache:
     driver: local

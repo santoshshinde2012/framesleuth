@@ -1,0 +1,40 @@
+# Keep the build context small and reproducible — never ship local state.
+.git
+.gitignore
+.venv
+venv
+env
+**/__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+dist
+build
+*.egg-info
+
+# Local runtime output (mounted at runtime, not baked into the image)
+bug-reports
+*.db
+*.sqlite3
+
+# Models / caches (downloaded at runtime into volumes)
+.cache
+models
+
+# Not needed in the runtime image (only `framesleuth/` is packaged)
+tests
+docs
+postman
+.github
+*.md
+!README.md
+
+# Editor / OS cruft
+.vscode
+.idea
+.DS_Store
+*.log
+.env

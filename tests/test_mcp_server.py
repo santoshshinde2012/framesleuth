@@ -164,6 +164,7 @@ async def test_build_server_registers_full_contract(tmp_path: Path) -> None:
         "get_suggested_actions",
         "locate_in_code",
         "render",
+        "render_html_video",
     }
 
     resource_uris = {tpl.uriTemplate for tpl in await server.list_resource_templates()}

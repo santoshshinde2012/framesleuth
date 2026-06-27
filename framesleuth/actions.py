@@ -205,7 +205,7 @@ def suggest_actions(report: dict[str, Any]) -> list[dict[str, str]]:
             "recapture",
             "Re-record with console & network logs",
             "Analysis quality is degraded — there is not enough evidence to act confidently.",
-            "inkwell capture (attach sidecars)",
+            "capture with sidecars attached",
         )
 
     if label == "bug" or has_errors:

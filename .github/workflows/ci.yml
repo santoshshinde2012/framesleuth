@@ -25,7 +25,7 @@ jobs:
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        run: uv pip install --system -e ".[dev]"
 
       - name: Lint with ruff
         run: ruff check framesleuth tests
@@ -59,7 +59,7 @@ jobs:
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        run: uv pip install --system -e ".[dev]"
 
       - name: Run tests with coverage
         run: pytest tests/ -v --cov=framesleuth --cov-report=xml --cov-report=term-missing
@@ -69,6 +69,27 @@ jobs:
         with:
           files: ./coverage.xml
           fail_ci_if_error: true
+
+  docker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml
+        run: docker compose config -q
+
+      - name: Build backend image
+        run: docker build -t framesleuth-backend:ci .
+
+      # Import the heavy runtime deps inside the image — catches missing system
+      # libraries (e.g. opencv's libGL) and packaging regressions before release.
+      # Also asserts the HTML→video render stack is ready (Playwright + ffmpeg +
+      # a Chromium build), so the feature can't ship broken in the image.
+      - name: Verify image can import the runtime stack
+        run: |
+          docker run --rm framesleuth-backend:ci python -c "import cv2, av, faster_whisper, framesleuth.service.api; print('runtime OK')"
+          docker run --rm framesleuth-backend:ci python -c "from framesleuth.pipeline.html_render import render_availability; a=render_availability(); print(a); assert a['ready'], a"
 
   dependency-audit:
     runs-on: ubuntu-latest

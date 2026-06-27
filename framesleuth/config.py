@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     # === Server configuration ===
     BACKEND_HOST: str = "127.0.0.1"
-    BACKEND_PORT: int = 8010  # 8000 commonly taken by the inkwell capture backend
+    BACKEND_PORT: int = 8010  # 8000 left free for a capture backend, if you run one
     MCP_HOST: str = "127.0.0.1"
     MCP_PORT: int = 3001
 

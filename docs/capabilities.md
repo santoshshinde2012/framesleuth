@@ -131,7 +131,7 @@ expose it to the browser/internet directly.
 
 | Method · Path | Returns |
 |---|---|
-| `GET /v1/healthz` | VLM / coder / storage readiness + overall `status`. |
+| `GET /v1/healthz` | VLM / coder / storage readiness + overall `status`. Also includes a `render` block reporting optional HTML→video readiness in the running process: `{playwright, playwright_version, chromium, ffmpeg, python, ready, hint}`. |
 | `GET /v1/skills` | Built-in summary skills + default. |
 | `GET /v1/actions` | Built-in action modes + default + `auto` flag. |
 | `POST /v1/analyze` | Queues the pipeline (background, bounded by `MAX_CONCURRENT_JOBS`) → `202 {job_id, status: "queued", idempotent}`. Poll `/v1/jobs/{id}` for completion. |
@@ -139,6 +139,7 @@ expose it to the browser/internet directly.
 | `GET /v1/report/{id}` | The full Bug Context Bundle. |
 | `GET /v1/video/{id}` | The stored source recording (correct media type). |
 | `GET /v1/gif/{id}` | An animated GIF preview of the recording (`image/gif`). Optional `fps`/`width`/`start`/`end` query params (clamped); rendered on demand and cached on disk per parameter set. |
+| `POST /v1/render-html` | Render an HTML document (CSS/JS/canvas animation) to a clip. JSON body `{html, format: mp4\|gif\|webm, duration_s, fps, width, height}`; returns the encoded file. Optional capability — needs the `render` extra (Playwright) + `ffmpeg`; returns `503` with an actionable message when unavailable. Check `GET /v1/healthz` → `render.ready` first. |
 
 ---
 
@@ -147,10 +148,11 @@ expose it to the browser/internet directly.
 Stdio (`framesleuth-mcp`). All tools are **read-only** over the workspace/bundle dir
 — edits happen only through the calling agent's reviewed apply flow.
 
-**Tools (13):** `analyze_video`, `list_skills`, `list_actions`, `list_bug_reports`,
+**Tools (14):** `analyze_video`, `list_skills`, `list_actions`, `list_bug_reports`,
 `get_bug_report(view=full|slim)`, `get_suggested_actions`, `get_repro_steps`,
 `get_error_evidence`, `get_timeline`, `get_keyframe_image`,
-`get_video_gif(fps,width,start,end)`, `locate_in_code`, `render(format)`.
+`get_video_gif(fps,width,start,end)`, `locate_in_code`, `render(format)`,
+`render_html_video(html,format,duration_s,fps,width,height)`.
 
 **Resources (4):** `videobug://report/{id}/summary` · `…/fix-prompt` · `…/markdown` ·
 `…/issue`.

@@ -327,3 +327,79 @@ def test_upload_limit_enforced(tmp_path: Path) -> None:
             files={"video": ("big.mp4", large, "video/mp4")},
         )
         assert response.status_code == 413
+
+
+def test_render_html_rejects_missing_html(tmp_path: Path) -> None:
+    """No/blank HTML is a 400 with a stable error code, before any render work."""
+    app = create_app(_make_settings(tmp_path))
+    with TestClient(app) as client:
+        for body in ({}, {"html": ""}, {"html": "   "}):
+            resp = client.post("/v1/render-html", json=body)
+            assert resp.status_code == 400
+            assert resp.json()["detail"]["code"] == "missing_html"
+
+
+def test_render_html_rejects_bad_format(tmp_path: Path) -> None:
+    """An unsupported output format is rejected up front (400 bad_options)."""
+    app = create_app(_make_settings(tmp_path))
+    with TestClient(app) as client:
+        resp = client.post("/v1/render-html", json={"html": "<h1>hi</h1>", "format": "tiff"})
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["code"] == "bad_options"
+
+
+def test_render_html_success_streams_file(tmp_path: Path, monkeypatch) -> None:
+    """A successful render returns the encoded file with the right media type.
+
+    The Chromium/ffmpeg work is stubbed so the endpoint wiring (validation,
+    media-type mapping, download filename, response body) is tested without the
+    optional render dependencies.
+    """
+    import framesleuth.pipeline.html_render as hr
+
+    async def fake_render(html: str, options, out_dir: Path) -> Path:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"render.{options.fmt}"
+        out.write_bytes(b"ENCODED-BYTES")
+        return out
+
+    monkeypatch.setattr(hr, "render_html", fake_render)
+
+    app = create_app(_make_settings(tmp_path))
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/render-html",
+            json={"html": "<h1>hi</h1>", "format": "gif", "duration_s": 2, "fps": 12},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("image/gif")
+        assert "animation.gif" in resp.headers.get("content-disposition", "")
+        assert resp.content == b"ENCODED-BYTES"
+
+
+def test_render_html_unavailable_returns_503(tmp_path: Path, monkeypatch) -> None:
+    """When Playwright/ffmpeg are missing the endpoint reports 503, not 500."""
+    import framesleuth.pipeline.html_render as hr
+
+    async def boom(html: str, options, out_dir: Path) -> Path:
+        raise hr.HtmlRenderError("Playwright is not installed.")
+
+    monkeypatch.setattr(hr, "render_html", boom)
+
+    app = create_app(_make_settings(tmp_path))
+    with TestClient(app) as client:
+        resp = client.post("/v1/render-html", json={"html": "<h1>hi</h1>", "format": "mp4"})
+        assert resp.status_code == 503
+        assert resp.json()["detail"]["code"] == "render_unavailable"
+
+
+def test_healthz_includes_render_availability(tmp_path: Path) -> None:
+    """/v1/healthz surfaces the optional HTML→video readiness block."""
+    app = create_app(_make_settings(tmp_path))
+    with TestClient(app) as client:
+        resp = client.get("/v1/healthz")
+        assert resp.status_code == 200
+        render = resp.json()["render"]
+        for key in ("playwright", "chromium", "ffmpeg", "python", "ready"):
+            assert key in render
+        assert isinstance(render["ready"], bool)

@@ -62,7 +62,7 @@ models/
 *.swp
 *~
 
-# --- Node (capture client lives in the inkwell repo, but guard against stray builds) ---
+# --- Node (capture client lives in a separate repo, but guard against stray builds) ---
 node_modules/
 
 # Local scratch test videos

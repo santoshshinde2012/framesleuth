@@ -53,7 +53,7 @@ newman run postman/Framesleuth.postman_collection.json \
 
 | Request | Method + path | Notes |
 |---|---|---|
-| Health | `GET /v1/healthz` | overall + per-service (`vlm`, `coder`, `storage`) |
+| Health | `GET /v1/healthz` | overall + per-service (`vlm`, `coder`, `storage`); plus a `render` block reporting optional HTML→video readiness |
 | List skills | `GET /v1/skills` | built-in summary styles + the default |
 | List actions | `GET /v1/actions` | built-in action modes (`fix`/`explain`/`triage`/`test`/`report`/`reproduce`) + default |
 | Analyze video | `POST /v1/analyze` | multipart: `video` (file), `intent?`, `skill?`, `system_prompt?`, `action?`, `action_prompt?`, `sidecars?`, `capture_options?`. **Async** — returns `202 {job_id, status: "queued"}`; poll **Get job status**. Idempotent on the video's SHA-256. |
@@ -61,6 +61,7 @@ newman run postman/Framesleuth.postman_collection.json \
 | Get report | `GET /v1/report/{job_id}` | the Bug Context Bundle (incl. `analysis_quality`); `409` until ready |
 | Get source video | `GET /v1/video/{job_id}` | streams the stored recording |
 | Get preview GIF | `GET /v1/gif/{job_id}` | animated `image/gif` preview; optional `fps`/`width`/`start`/`end`; cached on disk per params |
+| Render HTML to video | `POST /v1/render-html` | render a self-contained HTML animation to `mp4`/`gif`/`webm`; **optional** (needs `render` extra + `ffmpeg`) — `200` with the file or `503` when unavailable |
 
 > **Idempotency gotcha:** re-posting the *same bytes* returns the existing job
 > (`idempotent: true`) without re-running. Use a different file, or clear the

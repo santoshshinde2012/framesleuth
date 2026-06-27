@@ -13,6 +13,7 @@ flow, never here.
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -375,6 +376,31 @@ def build_server(bundle_root: Path | None = None) -> FastMCP:  # noqa: C901
         workspace = Path(repo_root) if repo_root else Path.cwd()
         queries = [str(item.get("text", "")) for item in report.get("error_evidence", [])]
         return [c.model_dump() for c in ground(workspace, queries)]
+
+    @mcp.tool()
+    async def render_html_video(
+        html: str,
+        format: str = "mp4",
+        duration_s: float = 5.0,
+        fps: int = 30,
+        width: int = 1280,
+        height: int = 720,
+    ) -> str:
+        """Render an HTML document (CSS / JS / canvas animation) to mp4/gif/webm.
+
+        Use this to export a self-contained animated HTML page (e.g. one you just
+        designed) as a shareable clip. Returns the absolute path to the encoded
+        file, written under the bundle directory. Requires the optional
+        ``render`` extra (Playwright) plus ``ffmpeg``.
+        """
+        from framesleuth.pipeline.html_render import RenderOptions, render_html
+
+        options = RenderOptions.normalized(
+            fmt=format, duration_s=duration_s, fps=fps, width=width, height=height
+        )
+        out_dir = root / "renders" / uuid.uuid4().hex
+        path = await render_html(html, options, out_dir)
+        return str(path)
 
     @mcp.resource("videobug://report/{report_id}/summary")
     def report_summary(report_id: str) -> str:
