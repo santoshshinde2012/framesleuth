@@ -18,7 +18,7 @@ from framesleuth.actions import resolve_action, suggest_actions
 from framesleuth.clients.coder import CoderClient
 from framesleuth.clients.vlm import VLMClient
 from framesleuth.config import Settings
-from framesleuth.errors import FramesleutheException
+from framesleuth.errors import FramesleutheException, JobCancelledError
 from framesleuth.jobs.store import JobStore
 from framesleuth.logging_config import get_logger, set_job_id
 from framesleuth.pipeline.asr import ASRPipeline
@@ -31,8 +31,10 @@ from framesleuth.pipeline.classify import (
     refine_classification_with_model,
 )
 from framesleuth.pipeline.confidence import assess_actionability, compute_field_confidence
+from framesleuth.pipeline.dedup import dedupe_keyframes
 from framesleuth.pipeline.fusion import build_timeline
 from framesleuth.pipeline.grounding import locate_in_code
+from framesleuth.pipeline.overlay import overlay_interactions
 from framesleuth.pipeline.preprocess import (
     ExtractedFrame,
     extract_audio,
@@ -193,6 +195,10 @@ class AnalysisOrchestrator:
                 work_dir=work_dir,
                 metrics=metrics,
             )
+        except JobCancelledError:
+            logger.info("Analysis cancelled for job %s", job_id)
+            await self.store.update_job(job_id, state=JobState.CANCELLED)
+            raise
         except FramesleutheException:
             raise
         except Exception as exc:  # mark the job failed before surfacing the error
@@ -224,6 +230,7 @@ class AnalysisOrchestrator:
     ) -> Path:
         parsed = parse_sidecars(sidecars)
 
+        await self._check_cancelled(job_id)
         await self.store.update_job(job_id, state=JobState.PREPROCESSING, progress_pct=10)
         duration_s = self._preprocess(video_path, metrics)
         transcript = self._transcribe(video_path, work_dir, metrics)
@@ -233,11 +240,13 @@ class AnalysisOrchestrator:
         transcript_text = " ".join(seg.text for seg in transcript.segments)
         build_aware = looks_like_build_intent(user_intent, transcript_text)
 
+        await self._check_cancelled(job_id)
         await self.store.update_job(job_id, state=JobState.UNDERSTANDING, progress_pct=40)
         scenes, analyzed_frames = await self._understand(
-            video_path, work_dir, duration_s, metrics, build_aware=build_aware
+            video_path, work_dir, duration_s, metrics, parsed=parsed, build_aware=build_aware
         )
 
+        await self._check_cancelled(job_id)
         await self.store.update_job(job_id, state=JobState.CLASSIFYING, progress_pct=65)
         sidecar_evidence, evidence_redactions = self._sidecar_evidence(parsed)
         sidecar_steps = derive_repro_steps(parsed)
@@ -273,10 +282,21 @@ class AnalysisOrchestrator:
         # Redact OCR text from all (incl. resampled) scenes before persistence.
         redactions: list[Redaction] = list(evidence_redactions)
         for scene in scenes:
-            redacted_text, applied = redact_text(scene.ocr_text, timestamp=scene.t0)
+            redacted_text, applied = redact_text(
+                scene.ocr_text, timestamp=scene.t0, redact_pii=self.settings.REDACT_PII
+            )
             scene.ocr_text = redacted_text
             redactions.extend(applied)
 
+        # Synthesize the summary/analysis from the (redacted) scenes + transcript,
+        # shaped by the caller's skill/system prompt, BEFORE extraction so the
+        # bundle can lead with it (the summary is the deliverable for general
+        # videos, and seeds the title when there is no error/caption). A model
+        # failure degrades to an empty string and never affects analysis_quality.
+        skill_label, skill_prompt = resolve_skill(skill, system_prompt)
+        summary = await self._summarize(scenes, transcript, skill_prompt, user_intent, metrics)
+
+        await self._check_cancelled(job_id)
         await self.store.update_job(job_id, state=JobState.EXTRACTING, progress_pct=80)
         keyframes = self._keyframes(scenes)
         bundle = extract_bug_context_bundle(
@@ -291,11 +311,13 @@ class AnalysisOrchestrator:
             sidecar_steps=sidecar_steps,
             sidecar_evidence=sidecar_evidence,
             degraded_stages=metrics["degraded"],
+            summary=summary,
         )
         bundle.redactions = redactions
         bundle.transcript_path = "transcript.json"
         bundle.timeline_path = "timeline.json"
         bundle.user_intent = user_intent
+        bundle.skill = skill_label
 
         # Resolve the action mode that shapes the fix-prompt. With no explicit
         # action it is auto-picked from the classification (bug -> fix, etc.).
@@ -304,15 +326,6 @@ class AnalysisOrchestrator:
         )
         bundle.action = action_label
         bundle.action_prompt = custom_action
-
-        # Synthesize a summary from the (redacted) scenes + transcript, shaped by
-        # the caller's skill/system prompt. Runs after extraction so a model
-        # failure never affects the evidence bundle or its analysis_quality.
-        skill_label, skill_prompt = resolve_skill(skill, system_prompt)
-        bundle.skill = skill_label
-        bundle.summary = await self._summarize(
-            scenes, transcript, skill_prompt, user_intent, metrics
-        )
 
         await self.store.update_job(job_id, state=JobState.GROUNDING, progress_pct=90)
         bundle.code_candidates = self._ground(
@@ -330,6 +343,10 @@ class AnalysisOrchestrator:
         # the build context, and the final analysis quality.
         bundle.suggested_actions = suggest_actions(bundle.model_dump(mode="json"))
 
+        # Surface per-stage timings on the bundle so consumers (and the report UI)
+        # can see where the analysis time went, not just that it finished.
+        bundle.stage_timings = {k: float(v) for k, v in metrics["stages"].items()}
+
         bundle_dir = self.settings.BUNDLE_DIR / job_id
         bundle_dir.mkdir(parents=True, exist_ok=True)
         bundle_path = bundle_dir / "bundle.json"
@@ -346,6 +363,16 @@ class AnalysisOrchestrator:
         )
         logger.info("Analysis complete: degraded_stages=%s", metrics["degraded"])
         return bundle_path
+
+    async def _check_cancelled(self, job_id: str) -> None:
+        """Abort the run cooperatively if the caller requested cancellation.
+
+        Checked at each stage boundary so a cancel takes effect promptly without
+        killing a thread mid-decode. Raises :class:`JobCancelledError`, which the
+        ``run`` wrapper turns into a terminal ``CANCELLED`` state.
+        """
+        if await self.store.is_cancel_requested(job_id):
+            raise JobCancelledError(job_id)
 
     def _preprocess(self, video_path: Path, metrics: dict[str, Any]) -> float:
         """Probe the video; degrade to a zero-duration bundle on failure."""
@@ -370,9 +397,11 @@ class AnalysisOrchestrator:
         start = time.perf_counter()
         try:
             audio_path = extract_audio(video_path, work_dir)
-            transcript = ASRPipeline(min_confidence=self.settings.ASR_MIN_CONFIDENCE).transcribe(
-                audio_path, has_audio=audio_path is not None
-            )
+            transcript = ASRPipeline(
+                min_confidence=self.settings.ASR_MIN_CONFIDENCE,
+                vad_filter=self.settings.ASR_VAD_FILTER,
+                language=self.settings.ASR_LANGUAGE or None,
+            ).transcribe(audio_path, has_audio=audio_path is not None)
             if transcript.segments:
                 metrics["stages"]["asr"] = round(time.perf_counter() - start, 3)
             else:
@@ -425,6 +454,7 @@ class AnalysisOrchestrator:
         duration_s: float,
         metrics: dict[str, Any],
         *,
+        parsed: ParsedSidecars | None = None,
         build_aware: bool = False,
     ) -> tuple[list[SceneRecord], list[KeyframeRef]]:
         """Run visual understanding when frames and the VLM are available.
@@ -432,7 +462,8 @@ class AnalysisOrchestrator:
         Returns the analyzed scenes alongside the keyframes they came from, so the
         source images can be persisted next to the bundle. ``build_aware`` raises the
         keyframe budget (to capture more distinct screens) and switches the per-frame
-        prompt to the structured build prompt.
+        prompt to the structured build prompt. ``parsed`` supplies click/cursor
+        sidecars used to overlay interaction markers onto the analyzed frames.
         """
         start = time.perf_counter()
         sampled = self._sample_times(duration_s, build_aware=build_aware)
@@ -443,6 +474,21 @@ class AnalysisOrchestrator:
             logger.info("Visual analysis skipped: no extracted frames available")
             metrics["degraded"].append("understand")
             return [], []
+        # Collapse near-identical frames (held spinners, static cards, repeated
+        # screens) so the VLM budget is spent on distinct content.
+        if self.settings.KEYFRAME_DEDUP and len(available) > 1:
+            available, dropped = dedupe_keyframes(
+                available, work_dir, max_hamming=self.settings.KEYFRAME_PHASH_HAMMING_MAX
+            )
+            if dropped:
+                metrics["keyframes_deduped"] = dropped
+                logger.info("Keyframe dedup dropped %d near-duplicate frame(s)", dropped)
+        # Draw click/cursor markers onto the frames the VLM is about to read, so a
+        # user interaction becomes visible evidence (no-op without coordinates).
+        if self.settings.OVERLAY_INTERACTIONS and parsed is not None:
+            marked = overlay_interactions(available, work_dir, parsed)
+            if marked:
+                metrics["interactions_overlaid"] = marked
         try:
             scenes = await analyze_keyframes(
                 available,
@@ -452,6 +498,7 @@ class AnalysisOrchestrator:
                 error_max_tokens=self.settings.VLM_ERROR_MAX_TOKENS,
                 rescue_frame=lambda t: self._rescue_frame(video_path, work_dir, t),
                 build_aware=build_aware,
+                ocr_backstop=self.settings.OCR_BACKSTOP,
             )
             metrics["stages"]["understand"] = round(time.perf_counter() - start, 3)
             return scenes, available
@@ -582,6 +629,7 @@ class AnalysisOrchestrator:
                 max_concurrency=self.settings.VLM_MAX_CONCURRENCY,
                 error_max_tokens=self.settings.VLM_ERROR_MAX_TOKENS,
                 rescue_frame=lambda t: self._rescue_frame(video_path, work_dir, t),
+                ocr_backstop=self.settings.OCR_BACKSTOP,
             )
         except Exception as exc:
             logger.warning("Resample understanding degraded: %s", exc)
@@ -648,7 +696,10 @@ class AnalysisOrchestrator:
         if not files:
             return []
         return select_keyframes(
-            frame_times=times, frame_files=files, error_hints=[False] * len(files)
+            frame_times=times,
+            frame_files=files,
+            error_hints=[False] * len(files),
+            cut_threshold=self.settings.SCENE_CUT_THRESHOLD,
         )
 
     def _coverage_keyframes(
@@ -727,7 +778,9 @@ class AnalysisOrchestrator:
         evidence = derive_error_evidence(parsed)
         redactions: list[Redaction] = []
         for item in evidence:
-            item.text, applied = redact_text(item.text, timestamp=item.t)
+            item.text, applied = redact_text(
+                item.text, timestamp=item.t, redact_pii=self.settings.REDACT_PII
+            )
             redactions.extend(applied)
         return evidence, redactions
 
@@ -764,7 +817,9 @@ class AnalysisOrchestrator:
         queries = _grounding_queries(evidence)
         if not queries:
             queries = _intent_queries(user_intent, scenes or [])
-        candidates = locate_in_code(workspace_root, queries)
+        candidates = locate_in_code(
+            workspace_root, queries, max_files=self.settings.GROUNDING_MAX_FILES
+        )
         metrics["stages"]["grounding"] = round(time.perf_counter() - start, 3)
         return candidates
 

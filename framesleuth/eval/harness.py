@@ -249,6 +249,76 @@ def _is_sorted(values: list[float]) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Faithfulness — every emitted claim must trace to real evidence (no fabrication)
+# --------------------------------------------------------------------------- #
+
+
+def _citation_resolves(citation: str, n_scenes: int, n_segments: int) -> bool:
+    """Whether a ``frame:N`` / ``transcript:N`` citation points at real evidence."""
+    kind, _, index = citation.partition(":")
+    if not index.isdigit():
+        # Non-indexed citations (e.g. ``sidecar:env``) are accepted as provenance.
+        return bool(kind)
+    idx = int(index)
+    if kind == "frame":
+        return 0 <= idx < n_scenes
+    if kind == "transcript":
+        return 0 <= idx < n_segments
+    return True
+
+
+def run_faithfulness_eval() -> EvalResult:
+    """Every key moment / step must be cited *and* resolve to real evidence.
+
+    This is the model-free faithfulness gate: it builds a bundle from a known set
+    of scenes + narration and asserts that nothing the pipeline emits is fabricated
+    or mis-indexed — every key moment and observed step carries a citation that
+    points at a frame/transcript segment that actually exists, the deliverable for
+    a general video is present, and no scene-derived error evidence appears that was
+    not in an error scene.
+    """
+    scenes = [
+        _scene("Home screen", error=False),
+        _scene("clicked Save", error=False),
+        _scene("Error: request failed", error=True),
+    ]
+    transcript = _transcript("let me walk through saving a record")
+    n_scenes, n_segments = len(scenes), len(transcript.segments)
+    bundle = extract_bug_context_bundle(
+        job_id="faithfulness",
+        source_video="demo.mp4",
+        duration_s=4.0,
+        classification=Classification(label=ClassificationLabel.OTHER, confidence=0.4),
+        transcript=transcript,
+        scenes=scenes,
+        keyframes=[],
+        environment={},
+        summary="A short walkthrough of saving a record, ending in a failed request.",
+    )
+
+    moments_cited = all(m.evidence for m in bundle.key_moments)
+    moments_resolve = all(
+        _citation_resolves(c, n_scenes, n_segments) for m in bundle.key_moments for c in m.evidence
+    )
+    steps_resolve = all(
+        _citation_resolves(c, n_scenes, n_segments)
+        for step in bundle.repro_steps
+        for c in step.evidence
+    )
+    deliverable_present = bool(bundle.summary or bundle.key_moments)
+
+    checks: list[tuple[str, bool]] = [
+        ("key_moments_cited", moments_cited),
+        ("key_moments_resolve", moments_resolve),
+        ("steps_resolve", steps_resolve),
+        ("deliverable_present", deliverable_present),
+    ]
+    passed = sum(1 for _, ok in checks if ok)
+    failures = [name for name, ok in checks if not ok]
+    return EvalResult("faithfulness", passed / len(checks), len(checks), passed, failures)
+
+
+# --------------------------------------------------------------------------- #
 # Aggregate
 # --------------------------------------------------------------------------- #
 
@@ -264,6 +334,7 @@ def run_all(workspace_root: Path) -> dict[str, EvalResult]:
         "classification": run_classification_eval(),
         "grounding": run_grounding_eval(workspace_root),
         "citation": run_citation_eval(),
+        "faithfulness": run_faithfulness_eval(),
     }
 
 

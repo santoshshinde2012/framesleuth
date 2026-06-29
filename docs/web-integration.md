@@ -116,6 +116,12 @@ const { report } = await (await fetch("/api/report-bug", { method: "POST", body:
 
 That's the whole non-agentic path.
 
+> **Don't want to poll?** Stream `GET /v1/jobs/{id}/events` (Server-Sent Events) to
+> receive JSON progress snapshots until the job is terminal, or set `WEBHOOK_URL` so
+> the backend POSTs a compact `{id, state, title, action}` payload to your server on
+> completion. To abort a run, `DELETE /v1/jobs/{id}` (cooperative — it stops at the
+> next stage boundary and the job becomes `cancelled`).
+
 ### Inputs — `POST /v1/analyze` (multipart form)
 
 | Field | Required | Purpose |
@@ -125,7 +131,7 @@ That's the whole non-agentic path.
 | `intent` | — | The user's request, in their words. Recorded and woven into the fix-prompt. |
 | `skill` | — | Summary **style**: `summary` (default) · `bug_report` · `tutorial` · `action_items` · `release_notes`. `GET /v1/skills` lists them. |
 | `system_prompt` | — | Fully custom summary prompt; overrides `skill`. |
-| `action` | — | What the agent should **do**: `fix` · `explain` · `triage` · `test` · `report` · `reproduce`. Auto-picked from the classification when omitted. `GET /v1/actions` lists them. |
+| `action` | — | What the agent should **do**: `fix` · `summarize` · `explain` · `triage` · `test` · `report` · `reproduce`. Auto-picked from the classification when omitted. `GET /v1/actions` lists them. |
 | `action_prompt` | — | Fully custom action task; overrides `action`. |
 | `capture_options` | — | Arbitrary capture metadata, stored beside the bundle for provenance. |
 
@@ -140,13 +146,15 @@ The bundle the consumer reads. Key fields:
 | Field | What it is |
 |---|---|
 | `classification` | `label` (bug/tutorial/demo/feedback/other) + `confidence`. |
-| `title`, `severity`, `suspected_component` | Triage headline. |
-| `repro_steps[]` | Numbered, evidence-cited steps. |
+| `title`, `severity`, `suspected_component` | Triage headline. Bug-only — `null` for a general video. |
+| `summary`, `key_moments[]` | Narrative summary + salient timestamped moments — the deliverable for any (non-bug) video. |
+| `repro_steps[]` | Numbered, evidence-cited steps (empty when none were shown). |
 | `error_evidence[]` | Timestamped console / OCR / network errors. |
 | `code_candidates[]` | Ranked `file:line` locations from grounding. |
-| `summary`, `skill` | Narrative summary + the style used. |
+| `skill` | The summary style/skill used to produce `summary`. |
 | `action`, `suggested_actions[]` | Resolved response mode + a machine-readable next-step menu. |
 | `keyframe_refs[]`, `user_intent`, `environment` | Frames read, your request, environment. |
+| `stage_timings` | Per-stage wall-clock seconds — surface "where the time went" in your UI. |
 | `analysis_quality` | **Trust signal** — `full`/`partial`/`degraded` + `warnings`. Gate your UI/agent on it so a thin recording isn't shown as "no issues found". |
 
 See **[capabilities.md](capabilities.md)** for the complete input/output reference and
@@ -228,8 +236,8 @@ TOOLS = [
                 "action": {
                     "type": "string",
                     "description": (
-                        "Optional response mode: fix | explain | triage | test | report | "
-                        "reproduce. Omit to auto-pick from the classification."
+                        "Optional response mode: fix | summarize | explain | triage | test | "
+                        "report | reproduce. Omit to auto-pick from the classification."
                     ),
                 },
             },
@@ -344,9 +352,14 @@ orchestrates and renders.
   set it empty) and proxy through your backend instead.
 - **Put auth on *your* layer** (the browser→backend hop). Framesleuth assumes a trusted
   local caller.
-- **Redaction is built in** — Framesleuth strips secrets (passwords, tokens, JWTs) from
-  evidence before it's stored or returned, so the bundle you forward to an LLM is already
-  scrubbed. Still, treat bundles as sensitive.
+- **Redaction is built in** — Framesleuth strips secrets (passwords, tokens, JWTs) **and
+  PII** (emails, Luhn-valid card numbers, SSNs/phones, cloud keys) from evidence text
+  before it's stored or returned, so the bundle you forward to an LLM is already scrubbed
+  (`REDACT_PII`, on by default). Note redaction is text-only today — a secret visible *in a
+  frame* is not yet pixel-masked, so still treat bundles and keyframes as sensitive.
+- **Webhook target is yours.** If you set `WEBHOOK_URL`, the backend POSTs there on job
+  completion — point it at an endpoint you control; the payload carries no secrets beyond
+  the job title/action.
 - **Gate side effects in the agent.** The analysis is read-only; any tool that writes
   (apply patch, open PR, run a command) should require your explicit confirmation, not the
   model's.

@@ -1,331 +1,469 @@
 {
-  "info": {
-    "name": "Framesleuth API",
-    "_postman_id": "f7a1c0de-0000-4000-8000-framesleuth01",
-    "description": "Local HTTP API for Framesleuth — bug-reproduction video analysis.\n\nThe backend binds `127.0.0.1:8010` by default (set `BACKEND_PORT` to change). All routes are under `/v1`. Processing is **asynchronous**: `POST /v1/analyze` returns `202` immediately with a `job_id` and runs the full pipeline in the background (bounded by `MAX_CONCURRENT_JOBS`). Poll `GET /v1/jobs/{job_id}` until `state` is `done`, then `GET /v1/report/{job_id}`.\n\n**Quick start**\n1. Start the backend: `framesleuth-api` (or `source scripts/dev_up.sh`).\n2. Run `Health` to confirm it's up.\n3. Run `Analyze video` — pick a video file in the form-data `video` field (e.g. `samples/flash_bug.mp4`). The test script saves the returned `job_id` into the `jobId` collection variable.\n4. Poll `Get job status` until `state` is `done`, then run `Get report`, `Get source video` — they reuse `jobId` automatically.\n\nWith no model servers running the pipeline degrades gracefully; the bundle's `analysis_quality.level` will be `partial` or `degraded` and explains what was missing.",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+ "info": {
+  "name": "Framesleuth API",
+  "_postman_id": "f7a1c0de-0000-4000-8000-framesleuth01",
+  "description": "Local HTTP API for Framesleuth — bug-reproduction video analysis.\n\nThe backend binds `127.0.0.1:8010` by default (set `BACKEND_PORT` to change). All routes are under `/v1`. Processing is **asynchronous**: `POST /v1/analyze` returns `202` immediately with a `job_id` and runs the full pipeline in the background (bounded by `MAX_CONCURRENT_JOBS`). Poll `GET /v1/jobs/{job_id}` until `state` is `done`, then `GET /v1/report/{job_id}`.\n\n**Quick start**\n1. Start the backend: `framesleuth-api` (or `source scripts/dev_up.sh`).\n2. Run `Health` to confirm it's up.\n3. Run `Analyze video` — pick a video file in the form-data `video` field (e.g. `samples/flash_bug.mp4`). The test script saves the returned `job_id` into the `jobId` collection variable.\n4. Poll `Get job status` until `state` is `done`, then run `Get report`, `Get source video` — they reuse `jobId` automatically.\n\nWith no model servers running the pipeline degrades gracefully; the bundle's `analysis_quality.level` will be `partial` or `degraded` and explains what was missing.",
+  "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+ },
+ "variable": [
+  {
+   "key": "baseUrl",
+   "value": "http://127.0.0.1:8010",
+   "type": "string"
   },
-  "variable": [
-    {
-      "key": "baseUrl",
-      "value": "http://127.0.0.1:8010",
-      "type": "string"
+  {
+   "key": "jobId",
+   "value": "",
+   "type": "string"
+  }
+ ],
+ "item": [
+  {
+   "name": "Health",
+   "request": {
+    "method": "GET",
+    "header": [],
+    "url": {
+     "raw": "{{baseUrl}}/v1/healthz",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "healthz"
+     ]
     },
+    "description": "Liveness + dependency reachability. Returns overall `status` (healthy | degraded | unhealthy) and per-service health for `vlm`, `coder`, and `storage`.\n\nWithout the model servers running you'll see `status: unhealthy` with `vlm`/`coder` `unavailable` and `storage: ready` — that's expected, and analysis still works in degraded mode."
+   },
+   "event": [
     {
-      "key": "jobId",
-      "value": "",
-      "type": "string"
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "pm.test('200 OK', () => pm.response.code === 200);",
+       "const b = pm.response.json();",
+       "pm.test('has overall status', () => pm.expect(b).to.have.property('status'));",
+       "pm.test('reports storage health', () => pm.expect(b.services).to.have.property('storage'));"
+      ]
+     }
     }
-  ],
-  "item": [
-    {
-      "name": "Health",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/v1/healthz",
-          "host": ["{{baseUrl}}"],
-          "path": ["v1", "healthz"]
-        },
-        "description": "Liveness + dependency reachability. Returns overall `status` (healthy | degraded | unhealthy) and per-service health for `vlm`, `coder`, and `storage`.\n\nWithout the model servers running you'll see `status: unhealthy` with `vlm`/`coder` `unavailable` and `storage: ready` — that's expected, and analysis still works in degraded mode."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('200 OK', () => pm.response.code === 200);",
-              "const b = pm.response.json();",
-              "pm.test('has overall status', () => pm.expect(b).to.have.property('status'));",
-              "pm.test('reports storage health', () => pm.expect(b.services).to.have.property('storage'));"
-            ]
-          }
-        }
-      ]
+   ]
+  },
+  {
+   "name": "List skills",
+   "request": {
+    "method": "GET",
+    "header": [],
+    "url": {
+     "raw": "{{baseUrl}}/v1/skills",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "skills"
+     ]
     },
+    "description": "List the built-in summary skills you can pass to Analyze as `skill`, plus the default."
+   },
+   "event": [
     {
-      "name": "List skills",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/v1/skills",
-          "host": ["{{baseUrl}}"],
-          "path": ["v1", "skills"]
-        },
-        "description": "List the built-in summary skills you can pass to Analyze as `skill`, plus the default."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('200 OK', () => pm.response.code === 200);",
-              "pm.test('has default skill', () => pm.expect(pm.response.json()).to.have.property('default'));"
-            ]
-          }
-        }
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "pm.test('200 OK', () => pm.response.code === 200);",
+       "pm.test('has default skill', () => pm.expect(pm.response.json()).to.have.property('default'));"
       ]
-    },
-    {
-      "name": "List actions",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/v1/actions",
-          "host": ["{{baseUrl}}"],
-          "path": ["v1", "actions"]
-        },
-        "description": "List the built-in action modes you can pass to Analyze as `action` (fix | explain | triage | test | report | reproduce), plus the default and the `auto` flag (when no action is sent, one is auto-picked from the classification)."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('200 OK', () => pm.response.code === 200);",
-              "const b = pm.response.json();",
-              "pm.test('has default action', () => pm.expect(b).to.have.property('default'));",
-              "pm.test('lists action modes', () => pm.expect(b.actions.map(a => a.name)).to.include('triage'));"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Analyze video",
-      "request": {
-        "method": "POST",
-        "header": [],
-        "body": {
-          "mode": "formdata",
-          "formdata": [
-            {
-              "key": "video",
-              "type": "file",
-              "src": [],
-              "description": "REQUIRED. The recording (.mp4/.webm/.mkv/.mov/.avi). Click 'Select Files' and choose e.g. samples/flash_bug.mp4."
-            },
-            {
-              "key": "intent",
-              "value": "The Save button hangs with a spinner. Find why and fix it, and add a retry.",
-              "type": "text",
-              "description": "OPTIONAL. The user's natural-language request. Recorded on the bundle and used to shape the generated fix prompt."
-            },
-            {
-              "key": "sidecars",
-              "value": "[{\"t\":0.1,\"source\":\"env\",\"ua\":\"Mozilla/5.0 Chrome/137\",\"url\":\"https://app.test/profile/settings\"},{\"t\":1.2,\"source\":\"click\",\"selector\":\"button\",\"text\":\"Save\"},{\"t\":1.4,\"source\":\"network\",\"method\":\"POST\",\"url\":\"/api/profile\",\"status\":500},{\"t\":1.5,\"source\":\"console\",\"text\":\"TypeError: cannot read property id of undefined\"}]",
-              "type": "text",
-              "description": "OPTIONAL. JSON array of browser sidecar events (console errors, failed network requests, clicks, env). Strong bug evidence even without visual models."
-            },
-            {
-              "key": "skill",
-              "value": "summary",
-              "type": "text",
-              "description": "OPTIONAL. Output style for the summary: summary (default) | bug_report | tutorial | action_items | release_notes. See the 'List skills' request."
-            },
-            {
-              "key": "system_prompt",
-              "value": "",
-              "type": "text",
-              "description": "OPTIONAL. Custom system prompt for the summary; overrides 'skill' when set. Leave blank to use 'skill'.",
-              "disabled": true
-            },
-            {
-              "key": "action",
-              "value": "",
-              "type": "text",
-              "description": "OPTIONAL. Action mode shaping the fix-prompt: fix | explain | triage | test | report | reproduce. See 'List actions'. Leave blank to auto-pick from the classification (bug→fix, tutorial→explain, …).",
-              "disabled": true
-            },
-            {
-              "key": "action_prompt",
-              "value": "",
-              "type": "text",
-              "description": "OPTIONAL. Fully custom action task text; overrides 'action'. Leave blank to use 'action'.",
-              "disabled": true
-            },
-            {
-              "key": "capture_options",
-              "value": "",
-              "type": "text",
-              "description": "OPTIONAL. JSON of capture settings; stored next to the bundle for provenance. Leave blank to skip.",
-              "disabled": true
-            }
-          ]
-        },
-        "url": {
-          "raw": "{{baseUrl}}/v1/analyze",
-          "host": ["{{baseUrl}}"],
-          "path": ["v1", "analyze"]
-        },
-        "description": "Upload a recording and queue the full analysis pipeline. Returns `202 {job_id, status: \"queued\", idempotent}` immediately; the pipeline runs in the background (bounded by `MAX_CONCURRENT_JOBS`). Poll `Get job status` until `state` is `done`.\n\n**Idempotency:** the response is keyed on the video's SHA-256 content hash. Re-posting the *same bytes* returns the existing job (`idempotent: true`) without re-running — change the file (or clear `bug-reports/`) to force a fresh analysis.\n\nThe test script saves `job_id` into the `jobId` collection variable so the other requests can reuse it."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('202 Accepted (or 200 idempotent)', () => pm.expect(pm.response.code).to.be.oneOf([200, 202]));",
-              "const b = pm.response.json();",
-              "pm.test('returns job_id', () => pm.expect(b).to.have.property('job_id'));",
-              "if (b.job_id) {",
-              "  pm.collectionVariables.set('jobId', b.job_id);",
-              "  pm.environment.set('jobId', b.job_id);",
-              "  console.log('Saved jobId =', b.job_id, '| idempotent =', b.idempotent);",
-              "}"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Get job status",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/v1/jobs/{{jobId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["v1", "jobs", "{{jobId}}"]
-        },
-        "description": "Lifecycle state + progress for a job: `state` (queued → preprocessing → understanding → classifying → extracting → grounding → done | failed), `progress_pct`, `bundle_path`, and any `error`. 404 if the job id is unknown."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('200 OK', () => pm.response.code === 200);",
-              "pm.test('has state', () => pm.expect(pm.response.json()).to.have.property('state'));"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Get report (Context Bundle)",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/v1/report/{{jobId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["v1", "report", "{{jobId}}"]
-        },
-        "description": "The canonical structured output — the Context Bundle (any video: bug, feature, demo, build). Key fields: `title`, `classification`, `repro_steps`, `error_evidence`, `keyframe_refs`, `code_candidates`, `user_intent`, `action` (resolved response mode), `suggested_actions` (machine-readable next-step menu), and `analysis_quality` (trust signal: `full` | `partial` | `degraded`, with `warnings` and `evidence_counts`).\n\n409 if the report isn't ready yet; 404 if the job is unknown."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('200 OK', () => pm.response.code === 200);",
-              "const b = pm.response.json();",
-              "pm.test('has analysis_quality', () => pm.expect(b).to.have.property('analysis_quality'));",
-              "pm.test('analysis_quality.level is valid', () => pm.expect(['full','partial','degraded']).to.include(b.analysis_quality.level));",
-              "console.log('quality =', b.analysis_quality && b.analysis_quality.level, '| title =', b.title);"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Get source video",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/v1/video/{{jobId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["v1", "video", "{{jobId}}"]
-        },
-        "description": "Streams back the stored source recording for a job (the `source.*` saved next to the bundle). 404 if missing."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('200 OK', () => pm.response.code === 200);"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Get preview GIF",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/v1/gif/{{jobId}}?fps=6&width=480",
-          "host": ["{{baseUrl}}"],
-          "path": ["v1", "gif", "{{jobId}}"],
-          "query": [
-            { "key": "fps", "value": "6", "description": "Frames per second (clamped 1-30). Optional; defaults to GIF_FPS." },
-            { "key": "width", "value": "480", "description": "Output width in px (clamped 64-1280; never upscaled). Optional; defaults to GIF_WIDTH." },
-            { "key": "start", "value": "0", "description": "Start offset in seconds. Optional; defaults to 0.", "disabled": true },
-            { "key": "end", "value": "8", "description": "End offset in seconds; window capped at GIF_MAX_DURATION_S. Optional.", "disabled": true }
-          ]
-        },
-        "description": "Renders an animated GIF preview (`image/gif`) of the recording, on demand from the stored `source.*`. The result is cached on disk per parameter set, so repeat requests are instant. Optional `fps`/`width`/`start`/`end` query params are clamped to safe ranges. 404 if no recording is stored; 422 if encoding fails."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('200 OK', () => pm.response.code === 200);",
-              "pm.test('is a GIF', () => pm.response.headers.get('Content-Type') === 'image/gif');"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Render HTML to video",
-      "request": {
-        "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"html\": \"<!doctype html><html><head><style>html,body{margin:0;height:100%;background:#071513;display:grid;place-items:center}.r{width:160px;height:160px;border-radius:50%;border:10px solid rgba(236,91,42,.2);border-top-color:#ec5b2a;animation:s 1.2s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style></head><body><div class=\\\"r\\\"></div></body></html>\",\n  \"format\": \"mp4\",\n  \"duration_s\": 4,\n  \"fps\": 30,\n  \"width\": 1280,\n  \"height\": 720\n}"
-        },
-        "url": {
-          "raw": "{{baseUrl}}/v1/render-html",
-          "host": ["{{baseUrl}}"],
-          "path": ["v1", "render-html"]
-        },
-        "description": "Renders a self-contained HTML animation (CSS/JS/canvas) to a clip and returns the encoded file (`video/mp4`, `image/gif`, or `video/webm`). `format` is one of `mp4|gif|webm`; `duration_s`/`fps`/`width`/`height` are clamped to safe ranges.\n\n**Optional capability** — needs the `render` extra (Playwright) plus `ffmpeg`. Returns `400` for bad input, and `503` with an actionable message when render is unavailable. Check `GET /v1/healthz` → `render.ready` first."
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "// Render is optional: 200 when available, 503 when Playwright/ffmpeg are missing.",
-              "pm.test('200 (rendered) or 503 (render not installed)', () => [200, 503].includes(pm.response.code));",
-              "if (pm.response.code === 200) {",
-              "  pm.test('returns a media file', () => /^(video|image)\\//.test(pm.response.headers.get('Content-Type')));",
-              "} else {",
-              "  pm.test('503 explains how to enable render', () => pm.expect(pm.response.text()).to.match(/playwright|ffmpeg|render/i));",
-              "}"
-            ]
-          }
-        }
-      ]
+     }
     }
-  ]
+   ]
+  },
+  {
+   "name": "List actions",
+   "request": {
+    "method": "GET",
+    "header": [],
+    "url": {
+     "raw": "{{baseUrl}}/v1/actions",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "actions"
+     ]
+    },
+    "description": "List the built-in action modes you can pass to Analyze as `action` (fix | summarize | explain | triage | test | report | reproduce), plus the default and the `auto` flag (when no action is sent, one is auto-picked from the classification)."
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "pm.test('200 OK', () => pm.response.code === 200);",
+       "const b = pm.response.json();",
+       "pm.test('has default action', () => pm.expect(b).to.have.property('default'));",
+       "pm.test('lists action modes', () => pm.expect(b.actions.map(a => a.name)).to.include('triage'));"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Analyze video",
+   "request": {
+    "method": "POST",
+    "header": [],
+    "body": {
+     "mode": "formdata",
+     "formdata": [
+      {
+       "key": "video",
+       "type": "file",
+       "src": [],
+       "description": "REQUIRED. The recording (.mp4/.webm/.mkv/.mov/.avi). Click 'Select Files' and choose e.g. samples/flash_bug.mp4."
+      },
+      {
+       "key": "intent",
+       "value": "The Save button hangs with a spinner. Find why and fix it, and add a retry.",
+       "type": "text",
+       "description": "OPTIONAL. The user's natural-language request. Recorded on the bundle and used to shape the generated fix prompt."
+      },
+      {
+       "key": "sidecars",
+       "value": "[{\"t\":0.1,\"source\":\"env\",\"ua\":\"Mozilla/5.0 Chrome/137\",\"url\":\"https://app.test/profile/settings\"},{\"t\":1.2,\"source\":\"click\",\"selector\":\"button\",\"text\":\"Save\"},{\"t\":1.4,\"source\":\"network\",\"method\":\"POST\",\"url\":\"/api/profile\",\"status\":500},{\"t\":1.5,\"source\":\"console\",\"text\":\"TypeError: cannot read property id of undefined\"}]",
+       "type": "text",
+       "description": "OPTIONAL. JSON array of browser sidecar events (console errors, failed network requests, clicks, env). Strong bug evidence even without visual models."
+      },
+      {
+       "key": "skill",
+       "value": "summary",
+       "type": "text",
+       "description": "OPTIONAL. Output style for the summary: summary (default) | bug_report | tutorial | action_items | release_notes. See the 'List skills' request."
+      },
+      {
+       "key": "system_prompt",
+       "value": "",
+       "type": "text",
+       "description": "OPTIONAL. Custom system prompt for the summary; overrides 'skill' when set. Leave blank to use 'skill'.",
+       "disabled": true
+      },
+      {
+       "key": "action",
+       "value": "",
+       "type": "text",
+       "description": "OPTIONAL. Action mode shaping the fix-prompt: fix | summarize | explain | triage | test | report | reproduce. See 'List actions'. Leave blank to auto-pick from the classification (bug→fix, tutorial→explain, …).",
+       "disabled": true
+      },
+      {
+       "key": "action_prompt",
+       "value": "",
+       "type": "text",
+       "description": "OPTIONAL. Fully custom action task text; overrides 'action'. Leave blank to use 'action'.",
+       "disabled": true
+      },
+      {
+       "key": "capture_options",
+       "value": "",
+       "type": "text",
+       "description": "OPTIONAL. JSON of capture settings; stored next to the bundle for provenance. Leave blank to skip.",
+       "disabled": true
+      }
+     ]
+    },
+    "url": {
+     "raw": "{{baseUrl}}/v1/analyze",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "analyze"
+     ]
+    },
+    "description": "Upload a recording and queue the full analysis pipeline. Returns `202 {job_id, status: \"queued\", idempotent}` immediately; the pipeline runs in the background (bounded by `MAX_CONCURRENT_JOBS`). Poll `Get job status` until `state` is `done`.\n\n**Idempotency:** the response is keyed on the video's SHA-256 content hash. Re-posting the *same bytes* returns the existing job (`idempotent: true`) without re-running — change the file (or clear `bug-reports/`) to force a fresh analysis.\n\nThe test script saves `job_id` into the `jobId` collection variable so the other requests can reuse it."
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "pm.test('202 Accepted (or 200 idempotent)', () => pm.expect(pm.response.code).to.be.oneOf([200, 202]));",
+       "const b = pm.response.json();",
+       "pm.test('returns job_id', () => pm.expect(b).to.have.property('job_id'));",
+       "if (b.job_id) {",
+       "  pm.collectionVariables.set('jobId', b.job_id);",
+       "  pm.environment.set('jobId', b.job_id);",
+       "  console.log('Saved jobId =', b.job_id, '| idempotent =', b.idempotent);",
+       "}"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Get job status",
+   "request": {
+    "method": "GET",
+    "header": [],
+    "url": {
+     "raw": "{{baseUrl}}/v1/jobs/{{jobId}}",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "jobs",
+      "{{jobId}}"
+     ]
+    },
+    "description": "Lifecycle state + progress for a job: `state` (queued → preprocessing → understanding → classifying → extracting → grounding → done | failed | cancelled), `progress_pct`, `bundle_path`, per-stage `metrics`, and any `error`. 404 if the job id is unknown."
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "pm.test('200 OK', () => pm.response.code === 200);",
+       "pm.test('has state', () => pm.expect(pm.response.json()).to.have.property('state'));"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Cancel job",
+   "request": {
+    "method": "DELETE",
+    "header": [],
+    "url": {
+     "raw": "{{baseUrl}}/v1/jobs/{{jobId}}",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "jobs",
+      "{{jobId}}"
+     ]
+    },
+    "description": "Request cooperative cancellation of a queued/running job. The pipeline stops at the next stage boundary and the job becomes `cancelled`. Returns `200 {id, state, cancel_requested}`; `409` if the job is already terminal (done/failed/cancelled), `404` if unknown."
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "pm.test('200 or 409', () => [200,409].includes(pm.response.code));"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Stream job events (SSE)",
+   "request": {
+    "method": "GET",
+    "header": [
+     {
+      "key": "Accept",
+      "value": "text/event-stream"
+     }
+    ],
+    "url": {
+     "raw": "{{baseUrl}}/v1/jobs/{{jobId}}/events",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "jobs",
+      "{{jobId}}",
+      "events"
+     ]
+    },
+    "description": "Server-Sent Events progress stream. Each event is a JSON snapshot (`id`, `state`, `progress_pct`); the stream closes once the job reaches a terminal state. Follow a job without polling. (Postman shows the streamed body once it ends.)"
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "pm.test('200 OK', () => pm.response.code === 200);"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Get report (Context Bundle)",
+   "request": {
+    "method": "GET",
+    "header": [],
+    "url": {
+     "raw": "{{baseUrl}}/v1/report/{{jobId}}",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "report",
+      "{{jobId}}"
+     ]
+    },
+    "description": "The canonical structured output — the Context Bundle (any video: bug, feature, demo, build). Key fields: `title`, `classification`, `repro_steps`, `error_evidence`, `keyframe_refs`, `code_candidates`, `user_intent`, `action` (resolved response mode), `suggested_actions` (machine-readable next-step menu), and `analysis_quality` (trust signal: `full` | `partial` | `degraded`, with `warnings` and `evidence_counts`).\n\n409 if the report isn't ready yet; 404 if the job is unknown."
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "pm.test('200 OK', () => pm.response.code === 200);",
+       "const b = pm.response.json();",
+       "pm.test('has analysis_quality', () => pm.expect(b).to.have.property('analysis_quality'));",
+       "pm.test('analysis_quality.level is valid', () => pm.expect(['full','partial','degraded']).to.include(b.analysis_quality.level));",
+       "console.log('quality =', b.analysis_quality && b.analysis_quality.level, '| title =', b.title);"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Get source video",
+   "request": {
+    "method": "GET",
+    "header": [],
+    "url": {
+     "raw": "{{baseUrl}}/v1/video/{{jobId}}",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "video",
+      "{{jobId}}"
+     ]
+    },
+    "description": "Streams back the stored source recording for a job (the `source.*` saved next to the bundle). 404 if missing."
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "pm.test('200 OK', () => pm.response.code === 200);"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Get preview GIF",
+   "request": {
+    "method": "GET",
+    "header": [],
+    "url": {
+     "raw": "{{baseUrl}}/v1/gif/{{jobId}}?fps=6&width=480",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "gif",
+      "{{jobId}}"
+     ],
+     "query": [
+      {
+       "key": "fps",
+       "value": "6",
+       "description": "Frames per second (clamped 1-30). Optional; defaults to GIF_FPS."
+      },
+      {
+       "key": "width",
+       "value": "480",
+       "description": "Output width in px (clamped 64-1280; never upscaled). Optional; defaults to GIF_WIDTH."
+      },
+      {
+       "key": "start",
+       "value": "0",
+       "description": "Start offset in seconds. Optional; defaults to 0.",
+       "disabled": true
+      },
+      {
+       "key": "end",
+       "value": "8",
+       "description": "End offset in seconds; window capped at GIF_MAX_DURATION_S. Optional.",
+       "disabled": true
+      }
+     ]
+    },
+    "description": "Renders an animated GIF preview (`image/gif`) of the recording, on demand from the stored `source.*`. The result is cached on disk per parameter set, so repeat requests are instant. Optional `fps`/`width`/`start`/`end` query params are clamped to safe ranges. 404 if no recording is stored; 422 if encoding fails."
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "pm.test('200 OK', () => pm.response.code === 200);",
+       "pm.test('is a GIF', () => pm.response.headers.get('Content-Type') === 'image/gif');"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Render HTML to video",
+   "request": {
+    "method": "POST",
+    "header": [
+     {
+      "key": "Content-Type",
+      "value": "application/json"
+     }
+    ],
+    "body": {
+     "mode": "raw",
+     "raw": "{\n  \"html\": \"<!doctype html><html><head><style>html,body{margin:0;height:100%;background:#071513;display:grid;place-items:center}.r{width:160px;height:160px;border-radius:50%;border:10px solid rgba(236,91,42,.2);border-top-color:#ec5b2a;animation:s 1.2s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style></head><body><div class=\\\"r\\\"></div></body></html>\",\n  \"format\": \"mp4\",\n  \"duration_s\": 4,\n  \"fps\": 30,\n  \"width\": 1280,\n  \"height\": 720\n}"
+    },
+    "url": {
+     "raw": "{{baseUrl}}/v1/render-html",
+     "host": [
+      "{{baseUrl}}"
+     ],
+     "path": [
+      "v1",
+      "render-html"
+     ]
+    },
+    "description": "Renders a self-contained HTML animation (CSS/JS/canvas) to a clip and returns the encoded file (`video/mp4`, `image/gif`, or `video/webm`). `format` is one of `mp4|gif|webm`; `duration_s`/`fps`/`width`/`height` are clamped to safe ranges.\n\n**Optional capability** — needs the `render` extra (Playwright) plus `ffmpeg`. Returns `400` for bad input, and `503` with an actionable message when render is unavailable. Check `GET /v1/healthz` → `render.ready` first."
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "type": "text/javascript",
+      "exec": [
+       "// Render is optional: 200 when available, 503 when Playwright/ffmpeg are missing.",
+       "pm.test('200 (rendered) or 503 (render not installed)', () => [200, 503].includes(pm.response.code));",
+       "if (pm.response.code === 200) {",
+       "  pm.test('returns a media file', () => /^(video|image)\\//.test(pm.response.headers.get('Content-Type')));",
+       "} else {",
+       "  pm.test('503 explains how to enable render', () => pm.expect(pm.response.text()).to.match(/playwright|ffmpeg|render/i));",
+       "}"
+      ]
+     }
+    }
+   ]
+  }
+ ]
 }

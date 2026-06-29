@@ -67,6 +67,14 @@ uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
 ```
 
+**Optional extras** (each is a no-op when absent — install only what you need):
+
+| Extra | Install | Enables |
+|---|---|---|
+| `render` | `uv pip install -e ".[render]"` | HTML→video (Playwright + Chromium; `ffmpeg` on PATH) |
+| `ocr` | `uv pip install -e ".[ocr]"` | Dedicated OCR backstop on error frames (needs the `tesseract` binary) |
+| `all` | `uv pip install -e ".[all]"` | dev + render + ocr |
+
 ### 2. Configure environment
 
 ```bash
@@ -209,7 +217,8 @@ Expected response (all services up):
 The `render` block reports readiness of the optional HTML→video capability in the
 running process. When `ready` is `false`, `hint` says what to install and `python`
 shows which interpreter the server is using (see the HTML→video troubleshooting
-entry below).
+entry below). `queue_depth` reflects the number of jobs currently queued or running
+(bounded by `MAX_CONCURRENT_JOBS`).
 
 Without the model servers running you'll instead see `"status": "unhealthy"`
 with `vlm`/`coder` reporting `"status": "unavailable"` and `storage: ready`.
@@ -398,6 +407,19 @@ curl -s http://127.0.0.1:8010/v1/report/$JOB | python -m json.tool
 > (`idempotent: true`) without re-running. Use a different file, or clear the
 > scratch store (`rm -rf bug-reports/*`) to force a fresh run.
 
+**Follow progress without polling (SSE), or cancel a run:**
+
+```bash
+# Stream live progress until the job is done/failed/cancelled:
+curl -N http://127.0.0.1:8010/v1/jobs/$JOB/events
+
+# Cooperatively cancel a still-running job (it stops at the next stage boundary):
+curl -X DELETE http://127.0.0.1:8010/v1/jobs/$JOB        # -> {state, cancel_requested: true}
+```
+
+Set `WEBHOOK_URL` in `.env` to have the backend POST a compact `{id, state, title,
+action}` payload to your endpoint when a job finishes — no polling needed.
+
 Prefer a GUI? Import the Postman collection in [`postman/`](postman/README.md).
 
 ---
@@ -459,6 +481,20 @@ MAX_CONCURRENT_JOBS=4
 FRAME_LOWRES_HEIGHT=480
 MAX_FRAMES_PER_MIN=60
 CLASSIFY_CONFIDENCE_THRESHOLD=0.8  # Higher bar
+BUNDLE_TTL_DAYS=14                 # Purge old bundles on startup so disk stays bounded
+WEBHOOK_URL=https://your.app/hooks/framesleuth   # Notify on completion instead of polling
+```
+
+### Quality / cost knobs (all optional, on by default)
+
+```env
+KEYFRAME_DEDUP=true        # Drop near-identical frames before the VLM (saves budget)
+ASR_VAD_FILTER=true        # Voice-activity filter — fewer hallucinated transcript lines
+ASR_LANGUAGE=              # Force a language (ISO code), e.g. en; blank = auto-detect
+OVERLAY_INTERACTIONS=true  # Draw a marker where a click/cursor sidecar landed (if it has coords)
+OCR_BACKSTOP=true          # Second OCR read on error frames (needs the `ocr` extra + tesseract)
+REDACT_PII=true            # Scrub emails / cards / SSNs / phones / cloud keys, on top of secrets
+GROUNDING_MAX_FILES=5000   # Cap the workspace scan so large monorepos stay bounded
 ```
 
 ---

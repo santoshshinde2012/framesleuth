@@ -39,6 +39,8 @@ _FIX_PROMPT_FIELDS = {
     "classification",
     "action",
     "action_prompt",
+    "summary",
+    "key_moments",
 }
 
 # Fields kept in the ``slim`` view of a report — the action-relevant subset that
@@ -54,6 +56,7 @@ _SLIM_FIELDS = {
     "action",
     "suggested_actions",
     "summary",
+    "key_moments",
     "expected_behavior",
     "actual_behavior",
     "repro_steps",
@@ -144,6 +147,7 @@ def render_fix_prompt(report: dict[str, Any]) -> str:
         quality=data.get("analysis_quality"),
         build_context=data.get("build_context"),
         task=task,
+        summary=data.get("summary"),
     )
 
 
@@ -427,6 +431,7 @@ def build_server(bundle_root: Path | None = None) -> FastMCP:  # noqa: C901
                 "skill": report.get("skill"),
                 "action": report.get("action"),
                 "summary": report.get("summary"),
+                "key_moments": report.get("key_moments", []),
                 "actual_behavior": report.get("actual_behavior"),
                 "repro_steps": report.get("repro_steps", []),
                 "error_evidence": report.get("error_evidence", []),

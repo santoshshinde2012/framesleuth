@@ -20,16 +20,23 @@ class ASRPipeline:
         compute_type: str = "int8",
         *,
         min_confidence: float = 0.0,
+        vad_filter: bool = False,
+        language: str | None = None,
     ) -> None:
         """Initialize the ASR pipeline with a whisper model and compute type.
 
         ``min_confidence`` drops segments whose confidence (``1 - no_speech_prob``)
         falls below the threshold, filtering out Whisper's silence hallucinations.
         Defaults to ``0.0`` (keep everything) so direct callers are unaffected.
+        ``vad_filter`` enables faster-whisper's built-in Silero voice-activity
+        filter so silence is never decoded. ``language`` forces a transcription
+        language (ISO code) instead of auto-detecting.
         """
         self.model_name = model_name
         self.compute_type = compute_type
         self.min_confidence = min_confidence
+        self.vad_filter = vad_filter
+        self.language = language or None
 
     def transcribe(
         self,
@@ -54,7 +61,12 @@ class ASRPipeline:
                 return Transcript(segments=[], words=[])
             model = WhisperModel(self.model_name, compute_type=self.compute_type)
 
-        raw_segments, info = model.transcribe(str(audio_path), word_timestamps=True)
+        raw_segments, info = model.transcribe(
+            str(audio_path),
+            word_timestamps=True,
+            vad_filter=self.vad_filter,
+            language=self.language,
+        )
         segments: list[Transcript.Segment] = []
         words: list[dict[str, Any]] = []
 
@@ -88,11 +100,13 @@ class ASRPipeline:
                     }
                 )
 
+        detected_language = self.language or getattr(info, "language", None)
         logger.info(
-            "ASR complete: %s segments (%s dropped below conf %.2f), language=%s",
+            "ASR complete: %s segments (%s dropped below conf %.2f), vad=%s, language=%s",
             len(segments),
             dropped,
             self.min_confidence,
-            getattr(info, "language", "unknown"),
+            self.vad_filter,
+            detected_language or "unknown",
         )
-        return Transcript(segments=segments, words=words)
+        return Transcript(segments=segments, words=words, language=detected_language)

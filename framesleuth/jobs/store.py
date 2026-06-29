@@ -26,6 +26,7 @@ class StoredJob:
     error_json: dict[str, str] | None
     created_at: str
     updated_at: str
+    cancel_requested: bool = False
 
 
 class JobStore:
@@ -36,7 +37,7 @@ class JobStore:
         self.db_path = db_path
 
     async def initialize(self) -> None:
-        """Initialize schema if needed."""
+        """Initialize schema if needed (and migrate older databases forward)."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as conn:
             await conn.execute(
@@ -50,13 +51,21 @@ class JobStore:
                     bundle_path TEXT,
                     error_json TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_jobs_content_hash ON jobs(content_hash)"
             )
+            # Forward-migrate databases created before the cancel_requested column.
+            async with conn.execute("PRAGMA table_info(jobs)") as cursor:
+                columns = {row[1] for row in await cursor.fetchall()}
+            if "cancel_requested" not in columns:
+                await conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+                )
             await conn.commit()
 
     async def create_job(self, job_id: str, content_hash: str, source_video: str) -> None:
@@ -141,10 +150,64 @@ class JobStore:
             )
             await conn.commit()
 
+    async def request_cancel(self, job_id: str) -> bool:
+        """Flag a job for cooperative cancellation; return whether a row was updated."""
+        now = datetime.now(UTC).isoformat()
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(
+                "UPDATE jobs SET cancel_requested = 1, updated_at = ? WHERE id = ?",
+                (now, job_id),
+            )
+            await conn.commit()
+            return bool(cursor.rowcount and cursor.rowcount > 0)
+
+    async def is_cancel_requested(self, job_id: str) -> bool:
+        """Whether a cancellation has been requested for ``job_id``."""
+        async with aiosqlite.connect(self.db_path) as conn, conn.execute(
+            "SELECT cancel_requested FROM jobs WHERE id = ?", (job_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return bool(row[0]) if row else False
+
+    async def count_active(self) -> int:
+        """Number of jobs currently queued or running (the live queue depth)."""
+        active = ",".join(f"'{s.value}'" for s in _ACTIVE_STATES)
+        async with aiosqlite.connect(self.db_path) as conn, conn.execute(
+            f"SELECT COUNT(*) FROM jobs WHERE state IN ({active})"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    async def list_jobs(self) -> list[StoredJob]:
+        """Return every persisted job (used by retention cleanup)."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute("SELECT * FROM jobs ORDER BY created_at") as cursor:
+                rows = await cursor.fetchall()
+        return [job for job in (_row_to_job(row) for row in rows) if job is not None]
+
+    async def delete_job(self, job_id: str) -> None:
+        """Delete a job row (its bundle directory is removed separately)."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            await conn.commit()
+
+
+# Job states that count toward the live queue depth (not yet terminal).
+_ACTIVE_STATES = (
+    JobState.QUEUED,
+    JobState.PREPROCESSING,
+    JobState.UNDERSTANDING,
+    JobState.CLASSIFYING,
+    JobState.EXTRACTING,
+    JobState.GROUNDING,
+)
+
 
 def _row_to_job(row: Any) -> StoredJob | None:
     if row is None:
         return None
+    keys = row.keys() if hasattr(row, "keys") else []
     return StoredJob(
         id=row["id"],
         state=JobState(row["state"]),
@@ -155,4 +218,5 @@ def _row_to_job(row: Any) -> StoredJob | None:
         error_json=json.loads(row["error_json"]) if row["error_json"] else None,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        cancel_requested=bool(row["cancel_requested"]) if "cancel_requested" in keys else False,
     )

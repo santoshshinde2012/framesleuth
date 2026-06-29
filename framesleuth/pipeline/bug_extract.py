@@ -7,9 +7,11 @@ from datetime import UTC, datetime
 from framesleuth.schemas import (
     AnalysisQuality,
     Classification,
+    ClassificationLabel,
     ContextBundle,
     ErrorEvidenceItem,
     KeyframeRef,
+    KeyMoment,
     Priority,
     Reproducibility,
     ReproStep,
@@ -19,6 +21,8 @@ from framesleuth.schemas import (
 )
 
 _MAX_TITLE_LEN = 200
+_MAX_KEY_MOMENTS = 12
+_MAX_MOMENT_LABEL_LEN = 200
 
 # Human-readable explanation for each pipeline stage that can degrade. Keeps the
 # warning text consistent between the bundle and the downstream fix prompt.
@@ -46,6 +50,77 @@ def _derive_repro_steps(scenes: list[SceneRecord]) -> list[ReproStep]:
             )
         )
     return steps
+
+
+def _thin_moments(moments: list[KeyMoment], cap: int) -> list[KeyMoment]:
+    """Reduce moments to ``cap``, always keeping errors and spreading the rest in time."""
+    errors = [m for m in moments if m.kind == "error"]
+    others = [m for m in moments if m.kind != "error"]
+    keep = errors[:cap]
+    slots = cap - len(keep)
+    if slots > 0 and others:
+        step = max(1, len(others) // slots)
+        keep = keep + others[::step][:slots]
+    return sorted(keep, key=lambda m: m.t)
+
+
+def _derive_key_moments(scenes: list[SceneRecord], transcript: Transcript) -> list[KeyMoment]:
+    """Distill the recording into a few salient, timestamped moments.
+
+    This is the analysis backbone for *any* video — it folds the visual scenes and
+    the spoken narration into one time-ordered list of "what happens when", each
+    anchored to its frame/transcript citation so nothing is fabricated. Consecutive
+    duplicate descriptions are collapsed and the list is thinned to a readable size
+    while always retaining error moments.
+    """
+    moments: list[KeyMoment] = []
+    for index, scene in enumerate(sorted(scenes, key=lambda s: s.t0)):
+        caption = (scene.caption or "").strip()
+        action = (scene.ui_action or "").strip()
+        if scene.is_error_state:
+            kind = "error"
+            label = caption or (scene.reason or "").strip() or "Error state observed"
+        elif action:
+            kind = "action"
+            label = caption or action
+        else:
+            kind = "scene"
+            label = caption
+        if not label:
+            continue
+        moments.append(
+            KeyMoment(
+                t=scene.t0,
+                label=label[:_MAX_MOMENT_LABEL_LEN],
+                kind=kind,  # type: ignore[arg-type]
+                evidence=[f"frame:{index}"],
+            )
+        )
+    for index, segment in enumerate(transcript.segments):
+        text = " ".join(segment.text.split()).strip()
+        if not text:
+            continue
+        moments.append(
+            KeyMoment(
+                t=segment.t0,
+                label=text[:_MAX_MOMENT_LABEL_LEN],
+                kind="speech",
+                evidence=[f"transcript:{index}"],
+            )
+        )
+
+    moments.sort(key=lambda m: m.t)
+    deduped: list[KeyMoment] = []
+    last_label: str | None = None
+    for moment in moments:
+        norm = moment.label.lower()
+        if norm == last_label:
+            continue
+        last_label = norm
+        deduped.append(moment)
+    if len(deduped) > _MAX_KEY_MOMENTS:
+        return _thin_moments(deduped, _MAX_KEY_MOMENTS)
+    return deduped
 
 
 def _derive_error_evidence(scenes: list[SceneRecord]) -> list[ErrorEvidenceItem]:
@@ -97,13 +172,15 @@ def _primary_evidence(evidence: list[ErrorEvidenceItem]) -> ErrorEvidenceItem | 
     return max(evidence, key=_evidence_rank)
 
 
-def _synthesize_title(primary: ErrorEvidenceItem | None, scenes: list[SceneRecord]) -> str:
+def _synthesize_title(
+    primary: ErrorEvidenceItem | None, scenes: list[SceneRecord], summary: str = ""
+) -> str:
     """Derive a concise headline.
 
     Prefers the strongest error. With no error, describe what was actually
-    observed (the first meaningful scene caption) so a non-bug recording gets an
-    informative title instead of the generic placeholder. Falls back to the
-    placeholder only when there is no visual evidence at all.
+    observed (the first meaningful scene caption, then the summary's opening
+    line) so a general recording gets an informative title instead of the generic
+    placeholder. Falls back to the placeholder only when there is no evidence at all.
     """
     if primary is not None:
         first = primary.text.splitlines()[0].strip()
@@ -112,7 +189,12 @@ def _synthesize_title(primary: ErrorEvidenceItem | None, scenes: list[SceneRecor
         caption = (scene.caption or "").strip()
         if caption:
             return caption[: _MAX_TITLE_LEN - 1]
-    return "Observed UI behavior during recorded flow"
+    summary_line = (summary or "").strip().splitlines()[0].strip() if summary else ""
+    # Strip a leading markdown heading marker the summary skill may emit.
+    summary_line = summary_line.lstrip("#").strip()
+    if summary_line:
+        return summary_line[: _MAX_TITLE_LEN - 1]
+    return "Recorded video (no analyzable content)"
 
 
 def _assess_quality(
@@ -135,7 +217,9 @@ def _assess_quality(
     """
     warnings = [_STAGE_WARNINGS[stage] for stage in degraded_stages if stage in _STAGE_WARNINGS]
 
-    has_evidence = bool(scenes or evidence)
+    # Any of visual scenes, error evidence, or a spoken transcript is enough to
+    # analyze a general video — a narrated clip with no UI is still summarizable.
+    has_evidence = bool(scenes or evidence or transcript.segments)
     if not has_evidence and not has_real_steps:
         level: str = "degraded"
         warnings.append(
@@ -177,51 +261,91 @@ def extract_bug_context_bundle(
     sidecar_steps: list[ReproStep] | None = None,
     sidecar_evidence: list[ErrorEvidenceItem] | None = None,
     degraded_stages: list[str] | None = None,
+    summary: str = "",
 ) -> ContextBundle:
-    """Build canonical bundle, merging visual and sidecar evidence without fabrication."""
+    """Build the canonical bundle, merging visual and sidecar evidence without fabrication.
+
+    The shape adapts to what the video is. When it depicts a defect — a ``bug``
+    classification or any real error evidence — the bug-oriented fields (severity,
+    priority, expected/actual behavior, preconditions, a guaranteed repro step) are
+    populated. For a *general* video (a demo, walkthrough, real-world clip) those
+    fields stay ``None``/empty and the deliverable is the ``summary`` plus the
+    derived ``key_moments`` — no fabricated "expected behavior" or severity.
+    """
     scene_steps = _derive_repro_steps(scenes)
     all_steps = scene_steps + list(sidecar_steps or [])
     real_steps = _renumber([step for step in all_steps if step.evidence])
     has_real_steps = bool(real_steps)
-    cited_steps = real_steps or [
-        ReproStep(
-            n=1,
-            t=0.0,
-            action="Open the page and reproduce the observed behavior",
-            evidence=["sidecar:env"],
-            confidence=0.5,
-        )
-    ]
+    # The synthetic fallback step only makes sense for a bug we want reproduced.
+    fallback_step = ReproStep(
+        n=1,
+        t=0.0,
+        action="Open the page and reproduce the observed behavior",
+        evidence=["sidecar:env"],
+        confidence=0.5,
+    )
 
     evidence = _derive_error_evidence(scenes) + list(sidecar_evidence or [])
     evidence.sort(key=lambda item: item.t)
+    key_moments = _derive_key_moments(scenes, transcript)
 
     quality = _assess_quality(
         degraded_stages=list(degraded_stages or []),
         scenes=scenes,
         evidence=evidence,
-        cited_steps=cited_steps,
+        cited_steps=real_steps or [fallback_step],
         transcript=transcript,
         keyframes=keyframes,
         has_real_steps=has_real_steps,
     )
 
     primary = _primary_evidence(evidence)
-    title = _synthesize_title(primary, scenes)
-    severity = Severity.HIGH if evidence else Severity.MEDIUM
-    priority = Priority.P1 if evidence else Priority.P2
-    if primary is not None:
-        actual_behavior = primary.text.strip()
-    elif quality.level == "degraded":
-        # Be honest: we could not extract enough to describe behavior. Do not imply
-        # the flow succeeded — that would mislead a downstream agent into "no-op".
-        actual_behavior = (
-            "Analysis incomplete — not enough evidence was extracted to describe "
-            "the observed behavior (see analysis_quality.warnings)."
-        )
-    else:
-        actual_behavior = "Recorded flow completed; no explicit error surfaced."
+    title = _synthesize_title(primary, scenes, summary)
 
+    # A bug bundle carries the diagnostic fields; a general bundle suppresses them.
+    is_bug = classification.label is ClassificationLabel.BUG or bool(evidence)
+
+    if is_bug:
+        if primary is not None:
+            actual_behavior: str | None = primary.text.strip()
+        elif quality.level == "degraded":
+            # Be honest: we could not extract enough to describe behavior. Do not imply
+            # the flow succeeded — that would mislead a downstream agent into "no-op".
+            actual_behavior = (
+                "Analysis incomplete — not enough evidence was extracted to describe "
+                "the observed behavior (see analysis_quality.warnings)."
+            )
+        else:
+            actual_behavior = "Recorded flow completed; no explicit error surfaced."
+        return ContextBundle(
+            schema_version="1.0",
+            id=job_id,
+            source_video=source_video,
+            duration_s=duration_s,
+            created_at=datetime.now(UTC),
+            classification=classification,
+            reproducibility=Reproducibility.SHOWN_ONCE,
+            title=title,
+            severity=Severity.HIGH if evidence else Severity.MEDIUM,
+            priority=Priority.P1 if evidence else Priority.P2,
+            suspected_component=environment.get("component", "unknown"),
+            environment=environment,
+            preconditions="User is authenticated and page is loaded.",
+            repro_steps=real_steps or [fallback_step],
+            expected_behavior="Action completes successfully without errors.",
+            actual_behavior=actual_behavior,
+            error_evidence=evidence,
+            keyframe_refs=keyframes,
+            key_moments=key_moments,
+            analysis_quality=quality,
+            summary=summary,
+            transcript_path="transcript.json" if transcript.segments else None,
+            timeline_path="timeline.json",
+            redactions=[],
+            code_candidates=[],
+        )
+
+    # General video: summary + key moments are the substance; bug fields stay null.
     return ContextBundle(
         schema_version="1.0",
         id=job_id,
@@ -229,19 +353,21 @@ def extract_bug_context_bundle(
         duration_s=duration_s,
         created_at=datetime.now(UTC),
         classification=classification,
-        reproducibility=Reproducibility.SHOWN_ONCE,
+        reproducibility=None,
         title=title,
-        severity=severity,
-        priority=priority,
-        suspected_component=environment.get("component", "unknown"),
+        severity=None,
+        priority=None,
+        suspected_component=environment.get("component") or None,
         environment=environment,
-        preconditions="User is authenticated and page is loaded.",
-        repro_steps=cited_steps,
-        expected_behavior="Action completes successfully without errors.",
-        actual_behavior=actual_behavior,
+        preconditions=None,
+        repro_steps=real_steps,
+        expected_behavior=None,
+        actual_behavior=None,
         error_evidence=evidence,
         keyframe_refs=keyframes,
+        key_moments=key_moments,
         analysis_quality=quality,
+        summary=summary,
         transcript_path="transcript.json" if transcript.segments else None,
         timeline_path="timeline.json",
         redactions=[],

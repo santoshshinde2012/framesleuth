@@ -13,19 +13,29 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from framesleuth.clients.health import get_health_status
 from framesleuth.clients.vlm import VLMClient
 from framesleuth.config import Settings, get_settings
-from framesleuth.errors import FramesleutheException, JobNotFoundError, UploadTooLargeError
+from framesleuth.errors import (
+    FramesleutheException,
+    JobCancelledError,
+    JobNotFoundError,
+    UploadTooLargeError,
+)
+from framesleuth.jobs.retention import purge_expired_bundles
 from framesleuth.jobs.store import JobStore
 from framesleuth.logging_config import get_logger
 from framesleuth.orchestrator.graph import AnalysisOrchestrator
 from framesleuth.schemas import JobState
+
+# Terminal job states — used by the SSE stream to know when to stop.
+_TERMINAL_STATES = {JobState.DONE.value, JobState.FAILED.value, JobState.CANCELLED.value}
 
 logger = get_logger("service.api")
 
@@ -54,6 +64,24 @@ def _safe_json(raw: str | None) -> Any:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        return None
+
+
+def _read_metrics(bundle_path: str | None) -> dict[str, Any] | None:
+    """Return the per-stage ``metrics.json`` next to a bundle, if present.
+
+    Surfaces stage timings and the degraded-stage list to a polling client so the
+    pipeline's progress is observable beyond the coarse ``progress_pct``.
+    """
+    if not bundle_path:
+        return None
+    metrics_path = Path(bundle_path).parent / "metrics.json"
+    if not metrics_path.exists():
+        return None
+    try:
+        loaded: dict[str, Any] = json.loads(metrics_path.read_text(encoding="utf-8"))
+        return loaded
+    except (OSError, json.JSONDecodeError):
         return None
 
 
@@ -111,12 +139,49 @@ class AppState:
                         Path(persisted.bundle_path).parent.joinpath(
                             "capture_options.json"
                         ).write_text(capture_options, encoding="utf-8")
+            except JobCancelledError:
+                # The orchestrator already recorded the terminal CANCELLED state.
+                logger.info("Background analysis cancelled for job %s", job_id)
             except FramesleutheException as exc:
                 await self.store.update_job(job_id, state=JobState.FAILED, error_json=exc.to_dict())
             except Exception:  # orchestrator already logged + marked FAILED
                 logger.exception("Background analysis failed for job %s", job_id)
             finally:
                 temp_path.unlink(missing_ok=True)
+                await self._notify_webhook(job_id)
+
+    async def _notify_webhook(self, job_id: str) -> None:
+        """POST a compact completion payload to ``WEBHOOK_URL`` (best-effort).
+
+        Fires once a job reaches a terminal state so an external system can react
+        without polling. Never raises — a webhook failure must not affect the job.
+        """
+        url = self.settings.WEBHOOK_URL.strip()
+        if not url:
+            return
+        job = await self.store.get_job(job_id)
+        if job is None or job.state.value not in _TERMINAL_STATES:
+            return
+        payload: dict[str, Any] = {
+            "id": job.id,
+            "state": job.state.value,
+            "source_video": job.source_video,
+            "error": job.error_json,
+        }
+        if job.bundle_path and Path(job.bundle_path).exists():
+            try:
+                bundle = json.loads(Path(job.bundle_path).read_text(encoding="utf-8"))
+                payload["title"] = bundle.get("title")
+                payload["action"] = bundle.get("action")
+            except (OSError, json.JSONDecodeError):
+                pass
+        try:
+            timeout = aiohttp.ClientTimeout(total=self.settings.WEBHOOK_TIMEOUT_S)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                await session.post(url, json=payload)
+            logger.info("Webhook delivered for job %s (%s)", job_id, job.state.value)
+        except Exception as exc:  # webhook is best-effort; never affect the job
+            logger.warning("Webhook POST failed for job %s: %s", job_id, exc)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:  # noqa: C901
@@ -132,6 +197,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:  # noqa: C901
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         settings.validate_paths()
         await state.store.initialize()
+        # Retention sweep: drop bundles/jobs past the TTL so disk stays bounded.
+        await purge_expired_bundles(state.store, settings.BUNDLE_DIR, settings.BUNDLE_TTL_DAYS)
         try:
             yield
         finally:
@@ -165,7 +232,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:  # noqa: C901
             vlm_url=settings.VLM_URL,
             coder_url=settings.CODER_URL,
             bundle_dir=str(settings.BUNDLE_DIR),
-            queue_depth=0,
+            queue_depth=await state.store.count_active(),
         )
         payload = health.model_dump()
         # Surface optional HTML→video readiness so it's diagnosable in the running
@@ -255,9 +322,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:  # noqa: C901
             "progress_pct": job.progress_pct,
             "bundle_path": job.bundle_path,
             "error": job.error_json,
+            "metrics": _read_metrics(job.bundle_path),
             "created_at": job.created_at,
             "updated_at": job.updated_at,
         }
+
+    @app.delete("/v1/jobs/{job_id}")
+    async def cancel_job(job_id: str) -> dict[str, object]:
+        """Request cooperative cancellation of a running/queued job.
+
+        The pipeline checks the cancel flag at each stage boundary and transitions
+        to ``cancelled``. Already-terminal jobs are returned unchanged (``409``).
+        """
+        job = await state.store.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=JobNotFoundError(job_id).to_dict())
+        if job.state.value in _TERMINAL_STATES:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": f"Job already {job.state.value}", "code": "not_cancellable"},
+            )
+        await state.store.request_cancel(job_id)
+        return {"id": job_id, "state": job.state.value, "cancel_requested": True}
+
+    @app.get("/v1/jobs/{job_id}/events")
+    async def job_events(job_id: str) -> StreamingResponse:
+        """Stream job progress as Server-Sent Events until a terminal state.
+
+        Each event is a JSON snapshot (`state`, `progress_pct`); the stream closes
+        once the job is `done`/`failed`/`cancelled`. Lets a client follow progress
+        without polling.
+        """
+        job = await state.store.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=JobNotFoundError(job_id).to_dict())
+
+        async def _stream() -> AsyncIterator[bytes]:
+            # Bounded so a stuck job can never hold the connection forever
+            # (JOB_TIMEOUT_S at the poll interval), with a terminal early-exit.
+            poll_s = 0.5
+            for _ in range(int(settings.JOB_TIMEOUT_S / poll_s)):
+                current = await state.store.get_job(job_id)
+                if current is None:
+                    break
+                snapshot = {
+                    "id": current.id,
+                    "state": current.state.value,
+                    "progress_pct": current.progress_pct,
+                }
+                yield f"data: {json.dumps(snapshot)}\n\n".encode()
+                if current.state.value in _TERMINAL_STATES:
+                    break
+                await asyncio.sleep(poll_s)
+
+        return StreamingResponse(_stream(), media_type="text/event-stream")
 
     @app.get("/v1/report/{job_id}")
     async def get_report(job_id: str) -> dict[str, object]:

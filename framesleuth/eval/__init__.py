@@ -13,6 +13,7 @@ from framesleuth.eval.harness import (
     run_all,
     run_citation_eval,
     run_classification_eval,
+    run_faithfulness_eval,
     run_grounding_eval,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "run_all",
     "run_citation_eval",
     "run_classification_eval",
+    "run_faithfulness_eval",
     "run_grounding_eval",
 ]

@@ -6,6 +6,7 @@ from framesleuth.eval import (
     run_all,
     run_citation_eval,
     run_classification_eval,
+    run_faithfulness_eval,
     run_grounding_eval,
 )
 from framesleuth.eval.harness import build_sample_workspace
@@ -48,7 +49,17 @@ def test_citation_integrity_perfect() -> None:
     assert result.metric == 1.0, str(result)
 
 
+def test_faithfulness_perfect() -> None:
+    """Every emitted key moment / step must cite real, resolvable evidence."""
+    result = run_faithfulness_eval()
+    assert result.metric == 1.0, str(result)
+
+
 def test_run_all_returns_every_suite(tmp_path: Path) -> None:
     results = run_all(tmp_path)
-    assert set(results) == {"classification", "grounding", "citation"}
+    assert set(results) == {"classification", "grounding", "citation", "faithfulness"}
     assert all(r.total > 0 for r in results.values())
+    # CI gate: no behavioral suite may regress below the 0.8 floor.
+    assert all(r.metric >= 0.8 for r in results.values()), {
+        name: str(r) for name, r in results.items()
+    }

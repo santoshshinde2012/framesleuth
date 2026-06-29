@@ -134,7 +134,7 @@ def test_title_falls_back_to_placeholder_without_visual_evidence() -> None:
         environment={},
         degraded_stages=["understand"],
     )
-    assert bundle.title == "Observed UI behavior during recorded flow"
+    assert bundle.title == "Recorded video (no analyzable content)"
 
 
 def _empty_bundle(degraded_stages: list[str]):
@@ -160,9 +160,12 @@ def test_quality_degraded_when_no_evidence_and_honest_actual_behavior() -> None:
     assert bundle.analysis_quality.level == "degraded"
     assert "preprocess" in bundle.analysis_quality.degraded_stages
     assert bundle.analysis_quality.warnings  # explains what is missing
-    # Must NOT imply the flow succeeded (which would mislead a downstream agent).
-    assert "completed successfully" not in bundle.actual_behavior.lower()
-    assert "incomplete" in bundle.actual_behavior.lower()
+    # A no-error run is a general bundle: bug-shaped behavior fields stay null and
+    # the honesty about insufficiency lives in analysis_quality.warnings.
+    assert bundle.actual_behavior is None
+    assert bundle.expected_behavior is None
+    assert bundle.severity is None
+    assert any("insufficient" in w.lower() for w in bundle.analysis_quality.warnings)
     assert bundle.analysis_quality.evidence_counts["error_evidence"] == 0
 
 

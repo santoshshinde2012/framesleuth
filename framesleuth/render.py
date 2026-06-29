@@ -46,6 +46,25 @@ def _error_lines(report: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _key_moment_lines(report: dict[str, Any]) -> list[str]:
+    """Render the timestamped key moments as markdown bullets."""
+    lines = []
+    for moment in report.get("key_moments", []):
+        t = moment.get("t")
+        stamp = f"_(t={t}s)_ " if isinstance(t, int | float) else ""
+        kind = moment.get("kind", "scene")
+        label = str(moment.get("label", "")).strip()
+        if label:
+            lines.append(f"- {stamp}`{kind}` — {label}")
+    return lines
+
+
+def _is_bug_report(report: dict[str, Any]) -> bool:
+    """Whether the report carries bug-shaped fields worth rendering as a bug."""
+    cls = str((report.get("classification") or {}).get("label", "")).lower()
+    return cls == "bug" or bool(report.get("error_evidence")) or bool(report.get("actual_behavior"))
+
+
 def _quality_note(report: dict[str, Any]) -> str:
     """One-line trust note derived from analysis_quality."""
     quality = report.get("analysis_quality") or {}
@@ -58,32 +77,46 @@ def _quality_note(report: dict[str, Any]) -> str:
 
 
 def render_markdown(report: dict[str, Any]) -> str:
-    """Render a shareable markdown report of the bundle."""
+    """Render a shareable markdown report of the bundle.
+
+    Adapts to the video: a bug report leads with steps/expected-vs-actual/errors;
+    a general video leads with the summary and key moments, omitting the bug-shaped
+    sections that would otherwise render as empty ``n/a`` noise.
+    """
     title = report.get("title", "Untitled recording")
     cls = (report.get("classification") or {}).get("label", "other")
     env = report.get("environment") or {}
     env_str = ", ".join(f"{k}={v}" for k, v in env.items()) or "(unknown)"
+    is_bug = _is_bug_report(report)
 
-    parts: list[str] = [
-        f"# {title}",
-        "",
-        f"**Type:** {cls}  |  **Severity:** {report.get('severity', '?')}  "
-        f"|  **Component:** {report.get('suspected_component', '?')}",
-        "",
-        _quality_note(report),
-        "",
-        f"**Environment:** {env_str}",
-    ]
+    meta = f"**Type:** {cls}"
+    if report.get("severity"):
+        meta += f"  |  **Severity:** {report['severity']}"
+    if report.get("suspected_component"):
+        meta += f"  |  **Component:** {report['suspected_component']}"
+
+    parts: list[str] = [f"# {title}", "", meta, "", _quality_note(report)]
+    if env:
+        parts += ["", f"**Environment:** {env_str}"]
     if report.get("summary"):
         parts += ["", "## Summary", "", str(report["summary"])]
-    parts += ["", "## Steps to reproduce", "", *_steps_lines(report)]
-    parts += [
-        "",
-        "## Expected vs actual",
-        "",
-        f"- **Expected:** {report.get('expected_behavior', 'n/a')}",
-        f"- **Actual:** {report.get('actual_behavior', 'n/a')}",
-    ]
+
+    moment_lines = _key_moment_lines(report)
+    if moment_lines:
+        parts += ["", "## Key moments", "", *moment_lines]
+
+    if is_bug:
+        parts += ["", "## Steps to reproduce", "", *_steps_lines(report)]
+        parts += [
+            "",
+            "## Expected vs actual",
+            "",
+            f"- **Expected:** {report.get('expected_behavior', 'n/a')}",
+            f"- **Actual:** {report.get('actual_behavior', 'n/a')}",
+        ]
+    elif report.get("repro_steps"):
+        parts += ["", "## Observed steps", "", *_steps_lines(report)]
+
     error_lines = _error_lines(report)
     if error_lines:
         parts += ["", "## Error evidence", "", *error_lines]
@@ -133,12 +166,12 @@ def render_test_plan(report: dict[str, Any]) -> str:
         "",
         "## What to assert",
         "",
-        f"- The flow should: {report.get('expected_behavior', 'complete without error')}",
-        f"- Today it instead: {report.get('actual_behavior', 'n/a')}",
+        f"- The flow should: {report.get('expected_behavior') or 'complete without error'}",
+        f"- Today it instead: {report.get('actual_behavior') or 'n/a'}",
         "",
         "## Arrange — preconditions",
         "",
-        f"- {report.get('preconditions', 'Application is running and the page is loaded.')}",
+        f"- {report.get('preconditions') or 'Application is running and the page is loaded.'}",
     ]
     env = report.get("environment") or {}
     if env:
