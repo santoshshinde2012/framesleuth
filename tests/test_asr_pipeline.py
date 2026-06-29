@@ -35,7 +35,7 @@ def test_asr_transcribes_with_model_override(tmp_path: Path) -> None:
         language = "en"
 
     class FakeModel:
-        def transcribe(self, _: str, word_timestamps: bool = True):
+        def transcribe(self, _: str, word_timestamps: bool = True, **kwargs: object):
             return [Segment()], Info()
 
     audio = tmp_path / "sample.wav"
@@ -71,7 +71,7 @@ def test_asr_drops_low_confidence_hallucinations(tmp_path: Path) -> None:
         language = "en"
 
     class FakeModel:
-        def transcribe(self, _: str, word_timestamps: bool = True):
+        def transcribe(self, _: str, word_timestamps: bool = True, **kwargs: object):
             # Real speech (conf 0.9) plus a "Thank you." hallucination (conf 0.28).
             return [Segment("real speech", 0.1), Segment("Thank you.", 0.72)], Info()
 
@@ -101,7 +101,7 @@ def test_asr_keeps_all_segments_by_default(tmp_path: Path) -> None:
         language = "en"
 
     class FakeModel:
-        def transcribe(self, _: str, word_timestamps: bool = True):
+        def transcribe(self, _: str, word_timestamps: bool = True, **kwargs: object):
             return [Segment(0.95)], Info()  # very low confidence
 
     audio = tmp_path / "sample.wav"
@@ -111,3 +111,26 @@ def test_asr_keeps_all_segments_by_default(tmp_path: Path) -> None:
         audio_path=audio, has_audio=True, model_override=FakeModel()
     )
     assert len(transcript.segments) == 1
+
+
+def test_asr_forwards_vad_and_language(tmp_path: Path) -> None:
+    """VAD/language settings reach faster-whisper and the language lands on output."""
+    captured: dict[str, object] = {}
+
+    class Info:
+        language = "es"
+
+    class FakeModel:
+        def transcribe(self, _: str, **kwargs: object):
+            captured.update(kwargs)
+            return [], Info()
+
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"wav")
+
+    pipeline = ASRPipeline(vad_filter=True, language="es")
+    transcript = pipeline.transcribe(audio_path=audio, has_audio=True, model_override=FakeModel())
+
+    assert captured["vad_filter"] is True
+    assert captured["language"] == "es"
+    assert transcript.language == "es"

@@ -66,6 +66,21 @@ ACTIONS: dict[str, Action] = {
             "evidence is thin, say plainly what is missing."
         ),
     ),
+    "summarize": Action(
+        name="summarize",
+        description="Summarize/analyze any video — what it shows, key moments, takeaways.",
+        task=(
+            "## Your task:\n"
+            "Summarize and analyze the video for a reader who has not watched it, "
+            "grounded ONLY in the evidence (summary, key moments, transcript, scenes). "
+            "Do NOT make code changes. Produce: a 2-4 sentence overview of what the "
+            "video is about, a short ordered list of the key moments with their "
+            "timestamps, and any notable takeaways or follow-ups. This may be any kind "
+            "of video (a demo, a walkthrough, a talk, a real-world clip) — describe it "
+            "on its own terms and do not force it into a bug/feature framing. If the "
+            "evidence is thin, say plainly what is missing."
+        ),
+    ),
     "triage": Action(
         name="triage",
         description="Assess severity/priority and route to the right component — no fix.",
@@ -152,7 +167,7 @@ _AUTO_BY_LABEL: dict[str, str] = {
     "tutorial": "explain",
     "demo": "explain",
     "feedback": "report",
-    "other": "explain",
+    "other": "summarize",
 }
 
 
@@ -305,18 +320,18 @@ def suggest_actions(report: dict[str, Any]) -> list[dict[str, str]]:
             "Turn the demonstrated steps into a tutorial or changelog entry.",
             "tool render(report_id, 'markdown')",
         )
-    else:  # feedback / other
+    else:  # feedback / other / general video
         add(
             "summarize",
-            "Summarize the recording",
-            "Capture what was said/shown for follow-up.",
+            "Summarize & analyze the video",
+            "A general recording — the summary and key moments are the deliverable.",
             f"resource framesleuth://report/{report_id}/summary",
         )
         add(
-            "open_issue",
-            "File it as a tracked item",
-            "Route feedback/requests to a tracker.",
-            "tool render(report_id, 'issue')",
+            "write_docs",
+            "Draft shareable notes",
+            "Turn the summary and key moments into a shareable note.",
+            "tool render(report_id, 'markdown')",
         )
 
     return suggestions

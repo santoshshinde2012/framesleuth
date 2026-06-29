@@ -19,10 +19,12 @@ def select_keyframes(
     change_scores: list[float] | None = None,
     error_hints: list[bool] | None = None,
     max_keyframes: int = 12,
+    cut_threshold: float = 0.35,
 ) -> list[KeyframeRef]:
     """Select keyframes using cuts, error hints, and a mandatory fallback.
 
-    Guarantees at least one keyframe for non-empty input.
+    Guarantees at least one keyframe for non-empty input. ``cut_threshold`` tunes
+    how large a visual delta counts as a scene cut.
     """
     if not frame_times or not frame_files:
         return []
@@ -33,7 +35,7 @@ def select_keyframes(
     scores = change_scores or [0.0] * len(frame_times)
     hints = error_hints or [False] * len(frame_times)
 
-    candidate_indices = set(detect_scene_cuts(scores))
+    candidate_indices = set(detect_scene_cuts(scores, threshold=cut_threshold))
     candidate_indices.update(idx for idx, is_hint in enumerate(hints) if is_hint)
 
     # Fallback for zero-cuts videos: choose midpoint frame.

@@ -47,6 +47,13 @@ dependencies = [
 render = [
     "playwright>=1.40,<2.0",
 ]
+# Dedicated OCR backstop for error frames. Optional because it needs the
+# `tesseract` system binary; with the extra installed AND tesseract on PATH, a
+# sparse VLM OCR on a suspected error frame gets a second, independent reading.
+# Absent, the pipeline is unchanged (the backstop is a no-op).
+ocr = [
+    "pytesseract>=0.3.10,<0.4",
+]
 dev = [
     "pytest==7.4.3",
     "pytest-asyncio==0.21.1",
@@ -59,9 +66,9 @@ dev = [
     "pre-commit==3.5.0",
     "httpx>=0.27,<0.29",
 ]
-# Convenience "give me everything" install: dev tooling + the render extra.
+# Convenience "give me everything" install: dev tooling + the render & ocr extras.
 all = [
-    "framesleuth[dev,render]",
+    "framesleuth[dev,render,ocr]",
 ]
 
 [project.scripts]
@@ -93,6 +100,7 @@ module = [
     "aiosqlite.*",
     "faster_whisper.*",
     "playwright.*",
+    "pytesseract.*",
 ]
 ignore_missing_imports = true
 # Treat these as untyped integration boundaries even when they ship (often

@@ -31,6 +31,7 @@ class ErrorCode(StrEnum):
     # Job/state errors
     JOB_NOT_FOUND = "job_not_found"
     JOB_TIMEOUT = "job_timeout"
+    JOB_CANCELLED = "job_cancelled"
     INVALID_STATE_TRANSITION = "invalid_state_transition"
 
     # Generic
@@ -204,6 +205,19 @@ class JobNotFoundError(FramesleutheException):
             code=ErrorCode.JOB_NOT_FOUND,
             hint="Check that the job ID is correct.",
             status_code=404,
+        )
+
+
+class JobCancelledError(FramesleutheException):
+    """Raised inside the pipeline when a job has been cancelled by the caller."""
+
+    def __init__(self, job_id: str) -> None:
+        """Initialize with the cancelled job's ID."""
+        super().__init__(
+            message=f"Job {job_id} was cancelled",
+            code=ErrorCode.JOB_CANCELLED,
+            hint="The job was cancelled via DELETE /v1/jobs/{id}.",
+            status_code=409,
         )
 
 

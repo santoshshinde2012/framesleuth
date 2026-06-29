@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     # or near-silent audio with a high no-speech probability. Drop any segment
     # below this confidence so the timeline is not polluted with phantom speech.
     ASR_MIN_CONFIDENCE: float = 0.5
+    # Run faster-whisper's built-in (Silero) voice-activity filter so silence is
+    # never fed to the decoder — the most effective guard against hallucinated
+    # speech, on top of the confidence floor above.
+    ASR_VAD_FILTER: bool = True
+    # Force a transcription language (ISO code, e.g. "en"); blank = auto-detect.
+    ASR_LANGUAGE: str = ""
 
     # === Upload and processing limits ===
     MAX_UPLOAD_MB: int = 512
@@ -107,6 +113,30 @@ class Settings(BaseSettings):
     # 480p downscale would smear stays legible — "resolution where text lives".
     FRAME_LOWRES_HEIGHT: int = 480
     FRAME_HIGHRES_HEIGHT: int = 1080
+    # Visual-delta score above which a frame is treated as a scene cut (fallback
+    # keyframe selector). Higher = fewer, sharper cuts; lower = more sensitive.
+    SCENE_CUT_THRESHOLD: float = 0.35
+    # Collapse near-identical keyframes (held spinners, static title cards, repeated
+    # screens) with a perceptual hash before the VLM, so the frame budget is spent
+    # on distinct content. Conservative by default: only frames within
+    # KEYFRAME_PHASH_HAMMING_MAX bits (out of 64) are treated as duplicates, so a
+    # subtle but real on-screen change (e.g. an error appearing) is never dropped.
+    KEYFRAME_DEDUP: bool = True
+    KEYFRAME_PHASH_HAMMING_MAX: int = 4
+
+    # Draw a marker on a keyframe when a click/cursor sidecar event with numeric
+    # coordinates lands near it, so the VLM (and a human reviewer) can see exactly
+    # where the user interacted. A no-op when events carry no coordinates.
+    OVERLAY_INTERACTIONS: bool = True
+    # Re-read suspected error frames with a dedicated OCR engine (pytesseract, the
+    # optional ``[ocr]`` extra) when the VLM's OCR comes back sparse — a deterministic
+    # backstop for tiny stack-trace text. A no-op when the extra is not installed.
+    OCR_BACKSTOP: bool = True
+
+    # === Grounding ===
+    # Bound the workspace scan so a large monorepo cannot make grounding unbounded;
+    # files beyond this count are skipped (and the truncation is logged).
+    GROUNDING_MAX_FILES: int = 5000
 
     # === GIF preview ===
     # On-demand animated GIF rendered from the stored recording so a client can
@@ -119,10 +149,20 @@ class Settings(BaseSettings):
     # === Storage ===
     BUNDLE_DIR: Path = Path("./bug-reports")
     DATABASE_PATH: Path = Path("./bug-reports/jobs.db")
+    # Delete persisted bundles (and their job rows) older than this many days on
+    # startup, so disk use stays bounded. 0 disables cleanup (keep forever).
+    BUNDLE_TTL_DAYS: int = 0
 
     # === Job queue ===
     MAX_CONCURRENT_JOBS: int = 2
     JOB_TIMEOUT_S: int = 1800  # 30 minutes
+
+    # === Notifications ===
+    # POST a compact completion payload (job id, state, title, action) to this URL
+    # when a job finishes, so an external system can react without polling. Blank
+    # disables it. Loopback/private targets are allowed (it is your own webhook).
+    WEBHOOK_URL: str = ""
+    WEBHOOK_TIMEOUT_S: float = 10.0
 
     # === Logging ===
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
@@ -139,6 +179,9 @@ class Settings(BaseSettings):
         "http://localhost:3000,http://127.0.0.1:3000"
     )
     REDACT_BEFORE_PROMPTS: bool = True
+    # Also redact PII (emails, Luhn-valid card numbers, US SSNs/phones, cloud keys)
+    # from OCR/console text, on top of the always-on secret/token patterns.
+    REDACT_PII: bool = True
 
     @property
     def web_origins_list(self) -> list[str]:

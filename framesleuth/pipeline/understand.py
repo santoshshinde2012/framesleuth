@@ -43,6 +43,23 @@ def _likely_error(response: FrameAnalysisResponse) -> bool:
     return any(hint in blob for hint in _ERROR_HINTS)
 
 
+def _augment_ocr(vlm_text: str, image_path: str) -> str:
+    """Merge the VLM's OCR with a dedicated OCR read, preferring the richer text.
+
+    The two readers fail differently; keeping the longer reading recovers small
+    error text the VLM smeared while never losing what the VLM already captured.
+    A no-op when the optional OCR backstop is unavailable.
+    """
+    from framesleuth.pipeline.ocr import ocr_image
+
+    backstop = ocr_image(image_path)
+    if not backstop:
+        return vlm_text
+    if len(backstop) > len(vlm_text.strip()):
+        return backstop
+    return vlm_text
+
+
 async def _analyze_one(
     keyframe: KeyframeRef,
     frames_dir: Path,
@@ -52,13 +69,16 @@ async def _analyze_one(
     error_max_tokens: int | None,
     rescue_frame: RescueFrame | None,
     build_aware: bool,
+    ocr_backstop: bool,
 ) -> SceneRecord:
     """Analyze a single keyframe, retrying once for sparse error-frame OCR.
 
     When ``build_aware`` is set (feature/demo/build videos), the first pass uses the
     build prompt that additionally extracts structured UI elements, layout, screen
     name, and design notes — the inputs a coding agent needs to *build* what was
-    shown. The error re-OCR retry still uses the focused error template.
+    shown. The error re-OCR retry still uses the focused error template. When
+    ``ocr_backstop`` is set, a dedicated OCR engine reads the high-res error frame
+    as an independent check and its text is used when it beats the VLM's OCR.
     """
     from framesleuth.prompts import VLMPrompts
 
@@ -80,6 +100,8 @@ async def _analyze_one(
             max_tokens=error_max_tokens,
             send_jpeg=False,
         )
+        if ocr_backstop:
+            response.ocr_text = _augment_ocr(response.ocr_text, hires or image_path)
 
     return SceneRecord(
         t0=keyframe.t,
@@ -107,6 +129,7 @@ async def analyze_keyframes(
     error_max_tokens: int | None = None,
     rescue_frame: RescueFrame | None = None,
     build_aware: bool = False,
+    ocr_backstop: bool = False,
 ) -> list[SceneRecord]:
     """Analyze keyframes concurrently and return scene records in keyframe order.
 
@@ -131,6 +154,7 @@ async def analyze_keyframes(
                 error_max_tokens=error_max_tokens,
                 rescue_frame=rescue_frame,
                 build_aware=build_aware,
+                ocr_backstop=ocr_backstop,
             )
 
     # gather preserves input order, keeping scenes aligned with their keyframes.

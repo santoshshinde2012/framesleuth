@@ -25,7 +25,7 @@ apply flow.
 |---|---|---|
 | tool | `analyze_video(path, repo_root?, intent?, skill?, system_prompt?, action?, action_prompt?)` | Run the full pipeline on a local video; returns the report `id`, the resolved `action`, the `suggested_actions` menu, and `summary_resource`/`fix_prompt_resource` URIs. Pass `repo_root` to ground errors to code, `intent` to steer the work, `skill` for a summary style, and `action` (or `action_prompt`) to shape what the agent should do (see §A). |
 | tool | `list_skills()` | List built-in summary skills (names + descriptions) |
-| tool | `list_actions()` | List built-in **action modes** (`fix`, `explain`, `triage`, `test`, `report`, `reproduce`) |
+| tool | `list_actions()` | List built-in **action modes** (`fix`, `summarize`, `explain`, `triage`, `test`, `report`, `reproduce`) |
 | tool | `list_reports()` | List available report ids |
 | tool | `get_report(report_id, view?)` | The Context Bundle. `view="slim"` returns the action-relevant subset for small context windows; `view="full"` (default) returns everything. |
 | tool | `get_suggested_actions(report_id)` | Machine-readable next-step menu (`action`/`label`/`rationale`/`ref`) |
@@ -56,6 +56,7 @@ i.e. what a coding agent is told to do with the evidence. Pick one with the
 | Action | The agent is told to… |
 |---|---|
 | `fix` | Diagnose the root cause and propose/make a minimal, targeted fix |
+| `summarize` | Summarize/analyze any video — overview, key moments, takeaways |
 | `explain` | Explain what happened — no code changes |
 | `triage` | Assess severity/priority and route to a component — no fix |
 | `test` | Write a failing regression test that reproduces it |
@@ -63,7 +64,8 @@ i.e. what a coding agent is told to do with the evidence. Pick one with the
 | `reproduce` | Produce minimal exact steps / a script to reproduce locally |
 
 **Default = auto-pick from classification:** with no `action`, a `bug` →
-`fix`, `tutorial`/`demo` → `explain`, `feedback` → `report`. The resolved action
+`fix`, `tutorial`/`demo` → `explain`, `feedback` → `report`, a general
+(`other`) video → `summarize`. The resolved action
 is stored on the report and drives the `fix-prompt`, so re-reading it later is
 consistent. `get_suggested_actions` returns a menu of follow-ups (propose a fix,
 write a test, open an issue, re-record with logs on a degraded run) that an agent
@@ -331,6 +333,11 @@ tuned for a single local GPU; the ones worth knowing:
 | `VLM_SEND_JPEG` | `true` | Send frames as JPEG (smaller upload, fewer vision tokens). Stored keyframes stay PNG. |
 | `MAX_RESAMPLE_RETRIES` | `2` | Bounded resample around the failure window on ambiguous runs (`0` disables). |
 | `CLASSIFY_USE_MODEL` | `true` | Break ambiguous-band classification ties with a model call. |
+| `KEYFRAME_DEDUP` | `true` | Drop near-identical frames (held spinners, repeated screens) before the VLM. |
+| `ASR_VAD_FILTER` | `true` | Voice-activity filter so silence isn't decoded — fewer hallucinated transcript lines. |
+| `OVERLAY_INTERACTIONS` | `true` | Draw a marker on a keyframe where a click/cursor sidecar landed (needs coordinates). |
+| `OCR_BACKSTOP` | `true` | Second OCR read on sparse error frames — needs the optional `ocr` extra + `tesseract`. |
+| `REDACT_PII` | `true` | Scrub PII (emails, cards, SSNs, phones, cloud keys) on top of secrets. |
 
 See [`.env.example`](../.env.example) for the full list. All are optional —
 the server runs with sensible defaults out of the box.

@@ -21,16 +21,16 @@ and says what was missing via `analysis_quality`.
 
 | Stage | Capability |
 |---|---|
-| **Preprocess** | Probe the container (recovers duration even from header-less browser WebM); sample frames at a bounded budget. |
-| **Transcribe (ASR)** | Local `faster-whisper` narration → timestamped transcript; drops silence hallucinations. |
-| **Understand (VLM)** | Per-keyframe `caption` / `ocr_text` / `ui_action` / `is_error_state` / `reason`, run **concurrently**. Sparse error frames are **re-OCR'd at full resolution, uncompressed**. |
+| **Preprocess** | Probe the container (recovers duration even from header-less browser WebM); sample frames at a bounded budget; **perceptual-hash dedup** collapses near-identical keyframes before the VLM. |
+| **Transcribe (ASR)** | Local `faster-whisper` narration → timestamped transcript; **voice-activity filter** drops silence and the detected/forced `language` is recorded. |
+| **Understand (VLM)** | Per-keyframe `caption` / `ocr_text` / `ui_action` / `is_error_state` / `reason`, run **concurrently**. Click/cursor sidecars are **overlaid** onto frames; sparse error frames are **re-OCR'd at full resolution** (with an optional dedicated **OCR backstop**). |
 | **Classify** | Deterministic, auditable bug/feature/tutorial/demo/feedback/other scoring (build/feature intent comes from the request + narration); an **ambiguous** result triggers a bounded **resample** + an optional **model tie-breaker**. |
 | **Build context** | For feature/build/demo videos: structured UI extraction (components, layout, screen names, design notes) + a screen-to-screen user flow → a buildable spec. |
-| **Extract** | Assemble the canonical Context Bundle with evidence citations and an `analysis_quality` trust signal. |
-| **Redact** | Strip secret-like strings (tokens, keys, passwords) from text **before** persistence. |
-| **Summarize** | A skill-shaped narrative of the recording (video + audio). |
-| **Ground** | Read-only workspace search → ranked candidate `file:line` locations. |
-| **Resolve action** | Pick what a downstream agent should *do* (see Actions), auto-selected from the classification. |
+| **Summarize** | A skill-shaped narrative (video + audio) plus distilled, timestamped **`key_moments`** — the deliverable for a general (non-bug) video. |
+| **Extract** | Assemble the canonical Context Bundle with evidence citations, an `analysis_quality` trust signal, per-field confidence (with cross-modal corroboration), and `stage_timings`. |
+| **Redact** | Strip secrets (tokens, keys, passwords) **and PII** (emails, Luhn-valid cards, SSNs/phones, cloud keys) from text **before** persistence. |
+| **Ground** | Read-only, `.gitignore`-aware workspace search → ranked candidate `file:line` (definitions preferred, IDF + whole-word + camel/snake query expansion), bounded for large repos. |
+| **Resolve action** | Pick what a downstream agent should *do* (see Actions), auto-selected from the classification (general video → `summarize`). |
 
 ---
 
@@ -63,21 +63,23 @@ bytes return the cached report (content-hash idempotency).
 |---|---|
 | `id`, `schema_version`, `source_video`, `duration_s`, `created_at` | Provenance. |
 | `classification` | `label` (bug/feature/tutorial/demo/feedback/other) + `confidence` + `alt_labels`. |
-| `title`, `severity`, `priority`, `suspected_component`, `reproducibility` | Triage headline. |
+| `title`, `severity`, `priority`, `suspected_component`, `reproducibility` | Triage headline. **Bug-only** — `null` for a general (non-bug) video. |
 | `environment` | OS / app / browser / version from sidecars or OCR. |
-| `preconditions`, `expected_behavior`, `actual_behavior` | The behavioral story. |
-| `repro_steps[]` | Numbered, **evidence-cited** steps. |
+| `preconditions`, `expected_behavior`, `actual_behavior` | The behavioral story. **Bug-only** — `null` for a general video (no fabricated placeholders). |
+| `repro_steps[]` | Numbered, **evidence-cited** steps. Observed steps for general video; empty when none were shown. |
+| `summary`, `key_moments[]` | The **deliverable for any video**: a narrative summary plus salient timestamped moments (`t` / `label` / `kind` of scene·action·speech·error / `evidence`). |
 | `error_evidence[]` | Timestamped console / OCR / network / UI errors. |
 | `keyframe_refs[]` | The frames the model read (resolvable images). |
 | `code_candidates[]` | Ranked `file:line` locations from grounding (definitions preferred). |
 | `build_context` | For feature/build/demo videos: `screens[]`, `components[]`, `user_flow[]`, `design_notes[]`, `data_models[]`, `is_greenfield`, `target_locations[]` — a buildable spec. Null for pure bugs. |
 | `field_confidence` | Per-field confidence 0-1 (title, repro_steps, severity, build_context…) so consumers know which claims to trust. |
-| `summary`, `skill` | Narrative summary + the style used. |
+| `skill` | The summary style/skill used to produce `summary`. |
 | `action`, `action_prompt` | Resolved response mode (and custom task, if any). |
 | `suggested_actions[]` | Machine-readable next-step menu (`action` / `label` / `rationale` / `ref`). |
 | `user_intent` | The request you passed. |
 | `analysis_quality` | **Trust signal** — `level` (`full`/`partial`/`degraded`) + `degraded_stages` + `warnings` + `evidence_counts` + `actionability` (`ready`/`thin`/`insufficient` for the resolved action). Read this first. |
-| `redactions[]` | What was scrubbed. |
+| `stage_timings` | Per-stage wall-clock seconds (`preprocess`, `asr`, `understand`, `summarize`, `grounding`…) — see where the analysis time went. Also surfaced live on `GET /v1/jobs/{id}` as `metrics`. |
+| `redactions[]` | What was scrubbed (secrets **and** PII: emails, Luhn-valid cards, SSNs/phones, cloud keys). |
 | `transcript_path`, `timeline_path` | Sibling artifacts (`transcript.json`, `timeline.json`). |
 
 Sibling files written next to `bundle.json`: `source.<ext>`, `keyframes/*.png`,
@@ -103,13 +105,14 @@ Pick with `skill`, or override with `system_prompt`. List live via `GET /v1/skil
 
 Pick with `action`, or override with `action_prompt`. List live via `GET /v1/actions`.
 With no `action`, one is **auto-picked** from the classification (bug→`fix`,
-feature→`implement`, tutorial/demo→`explain`, feedback→`report`).
+feature→`implement`, tutorial/demo→`explain`, feedback→`report`, other→`summarize`).
 
 | Action | The downstream agent is told to… |
 |---|---|
 | `fix` | Diagnose the root cause and propose/make a minimal fix. |
 | `implement` | Build or extend the feature shown, using the build context as a spec. |
 | `design` | Propose a UI/component/data design from what was shown — no code yet. |
+| `summarize` | Summarize/analyze **any** video — overview, key moments, takeaways. The default for a general (non-bug) video. |
 | `explain` | Explain what happened — no code changes. |
 | `triage` | Assess severity/priority and route it — no fix. |
 | `test` | Write a failing regression test that reproduces it. |
@@ -155,8 +158,10 @@ expose it to the browser/internet directly.
 | `GET /v1/healthz` | VLM / coder / storage readiness + overall `status`. Also includes a `render` block reporting optional HTML→video readiness in the running process: `{playwright, playwright_version, chromium, ffmpeg, python, ready, hint}`. |
 | `GET /v1/skills` | Built-in summary skills + default. |
 | `GET /v1/actions` | Built-in action modes + default + `auto` flag. |
-| `POST /v1/analyze` | Queues the pipeline (background, bounded by `MAX_CONCURRENT_JOBS`) → `202 {job_id, status: "queued", idempotent}`. Poll `/v1/jobs/{id}` for completion. |
-| `GET /v1/jobs/{id}` | Lifecycle state + progress + error. |
+| `POST /v1/analyze` | Queues the pipeline (background, bounded by `MAX_CONCURRENT_JOBS`) → `202 {job_id, status: "queued", idempotent}`. Poll `/v1/jobs/{id}` (or stream `/events`) for completion. |
+| `GET /v1/jobs/{id}` | Lifecycle state + progress + error + per-stage `metrics`. |
+| `GET /v1/jobs/{id}/events` | **Server-Sent Events** progress stream (JSON snapshots) that closes on a terminal state — follow a job without polling. |
+| `DELETE /v1/jobs/{id}` | Request **cooperative cancellation**; the pipeline stops at the next stage boundary and the job becomes `cancelled`. `409` if already terminal. |
 | `GET /v1/report/{id}` | The full Context Bundle. |
 | `GET /v1/video/{id}` | The stored source recording (correct media type). |
 | `GET /v1/gif/{id}` | An animated GIF preview of the recording (`image/gif`). Optional `fps`/`width`/`start`/`end` query params (clamped); rendered on demand and cached on disk per parameter set. |
@@ -194,16 +199,28 @@ See [Use with VS Code & Claude](use-with-vscode-and-claude.md) for client setup.
   warnings, so a thin recording is never mistaken for "nothing wrong".
 - **Evidence by structure** — every claim carries a citation (frame / sidecar /
   transcript); uncited claims are dropped.
-- **Redaction-first** — secret-like strings are scrubbed from text before anything is
-  persisted or returned (text-only today; pixel-level redaction is not yet built).
+- **Redaction-first** — secrets **and PII** (emails, Luhn-valid cards, SSNs/phones,
+  cloud keys) are scrubbed from text before anything is persisted or returned
+  (`REDACT_PII`; text-only — pixel-level redaction is not yet built).
+- **Interaction overlay** — a click/cursor sidecar with coordinates draws a marker on
+  the matching keyframe so the model sees *where* the user acted (`OVERLAY_INTERACTIONS`).
+- **OCR backstop** *(optional `ocr` extra)* — a sparse VLM OCR on an error frame gets a
+  second, independent reading from Tesseract; a no-op when the extra is absent.
+- **Better transcripts** — faster-whisper's voice-activity filter (`ASR_VAD_FILTER`)
+  removes silence before decoding, and the detected/forced `language` is recorded.
+- **Corpus-aware grounding** — `.gitignore`-respecting, IDF + whole-word ranked, with
+  camelCase/snake-case query expansion and a `GROUNDING_MAX_FILES` bound.
 - **Engine-agnostic** — swap Ollama / llama.cpp / vLLM via config (`VLM_URL`,
   `VLM_MODEL`, …); no code change.
+- **Job lifecycle** — cancel (`DELETE`), SSE progress (`/events`), a completion
+  **webhook** (`WEBHOOK_URL`), and TTL retention cleanup (`BUNDLE_TTL_DAYS`).
 - **Idempotent & self-cleaning** — identical uploads return the cached report; per-job
   scratch files are removed after each run.
 - **Local & private** — all models run on `localhost`; no telemetry, no cloud calls.
 
 Tuning knobs (concurrency, JSON mode, token caps, resample, classification
-tie-breaker, frame resolution) are documented in [`.env.example`](../.env.example).
+tie-breaker, frame resolution, keyframe dedup, ASR VAD, retention, webhook) are
+documented in [`.env.example`](../.env.example).
 
 ---
 

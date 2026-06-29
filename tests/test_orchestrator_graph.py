@@ -326,6 +326,95 @@ async def test_run_records_explicit_action_override(
     assert bundle["action_prompt"] is None
 
 
+class _GeneralVLM:
+    """VLM stub for a general (non-bug) recording: a plain scene, no error."""
+
+    async def analyze_frame(
+        self,
+        image_path: str,
+        timestamp: float,
+        prompt_override: str | None = None,
+        *,
+        max_tokens: int | None = None,
+        send_jpeg: bool | None = None,
+    ) -> FrameAnalysisResponse:
+        return FrameAnalysisResponse(
+            caption="A presenter demonstrates the analytics dashboard",
+            ocr_text="Revenue overview",
+            ui_action=None,
+            is_error_state=False,
+            reason=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_general_video_is_summary_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-bug video yields summary + key moments, suppresses bug fields, auto-summarizes."""
+    settings = _settings(tmp_path)
+    _stub_preprocess(monkeypatch, duration_s=10.0)
+
+    # A real summary comes back (overrides the autouse empty-summary stub) so we can
+    # assert it leads the bundle.
+    async def _fake_summary(*_a: object, **_k: object) -> str:
+        return "A walkthrough of the analytics dashboard and its revenue charts."
+
+    monkeypatch.setattr(graph_module, "summarize_recording", _fake_summary)
+
+    frames_dir = settings.BUNDLE_DIR / "job-gen" / ".work" / "frames"
+    frames_dir.mkdir(parents=True)
+    for i in range(8):
+        (frames_dir / f"{i}.png").write_bytes(b"\x89PNG")
+
+    store = JobStore(settings.DATABASE_PATH)
+    await _seed_job(store, "job-gen")
+    orchestrator = AnalysisOrchestrator(settings, store, _GeneralVLM())
+
+    video_path = tmp_path / "demo.webm"
+    video_path.write_bytes(b"fake")
+    bundle_path = await orchestrator.run("job-gen", video_path, "demo.webm")
+
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    # Not a bug — bug-shaped fields are suppressed.
+    assert bundle["classification"]["label"] != "bug"
+    assert bundle["severity"] is None
+    assert bundle["expected_behavior"] is None
+    assert bundle["actual_behavior"] is None
+    # The summary + key moments are the deliverable.
+    assert bundle["summary"].startswith("A walkthrough of the analytics dashboard")
+    assert bundle["key_moments"], "expected key moments for a general video"
+    # The action auto-picks 'summarize' and the menu offers it.
+    assert bundle["action"] == "summarize"
+    assert any(s["action"] == "summarize" for s in bundle["suggested_actions"])
+    # Per-stage timings are surfaced on the bundle for observability.
+    assert bundle["stage_timings"], "expected stage timings on the bundle"
+
+
+@pytest.mark.asyncio
+async def test_run_cancelled_job_transitions_to_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel requested before/at a checkpoint aborts the run into CANCELLED state."""
+    from framesleuth.errors import JobCancelledError
+
+    settings = _settings(tmp_path)
+    _stub_preprocess(monkeypatch, duration_s=0.0)
+
+    store = JobStore(settings.DATABASE_PATH)
+    await _seed_job(store, "job-cancel")
+    await store.request_cancel("job-cancel")  # cancel before the first checkpoint
+    orchestrator = AnalysisOrchestrator(settings, store, _ExplodingVLM())
+
+    video_path = tmp_path / "bug.webm"
+    video_path.write_bytes(b"fake")
+    with pytest.raises(JobCancelledError):
+        await orchestrator.run("job-cancel", video_path, "bug.webm")
+
+    job = await store.get_job("job-cancel")
+    assert job is not None and job.state == JobState.CANCELLED
+
+
 @pytest.mark.asyncio
 async def test_run_records_custom_action_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

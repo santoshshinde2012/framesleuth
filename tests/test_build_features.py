@@ -236,6 +236,24 @@ def test_field_confidence_reflects_evidence() -> None:
     assert "repro_steps" in conf
 
 
+def test_confidence_corroboration_boosts_agreeing_signals() -> None:
+    """An error that also grounds to code lifts the title + candidate confidence."""
+    from framesleuth.schemas import ErrorEvidenceItem
+
+    error = [ErrorEvidenceItem(t=0.0, source="console", text="boom")]
+    base = compute_field_confidence(_bundle(error_evidence=error))
+    corroborated = compute_field_confidence(
+        _bundle(
+            error_evidence=error,
+            code_candidates=[
+                CodeCandidate(file="a.py", line=1, match_reason="definition", confidence=0.6)
+            ],
+        )
+    )
+    assert corroborated["title"] > base["title"]
+    assert corroborated["code_candidates"] > 0.6  # boosted above the raw mean
+
+
 def test_actionability_insufficient_to_implement_without_build_context() -> None:
     bundle = _bundle(
         classification=Classification(label=ClassificationLabel.FEATURE, confidence=0.7),

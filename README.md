@@ -170,21 +170,33 @@ MCP server + local HTTP API
 ## Features
 
 - **Frame-by-frame understanding** using a local vision model (Qwen2.5-VL by default; engine-agnostic)
-- **Adaptive keyframe selection** — coverage-binned, visual-salience-ranked (AKS-style), with a build-aware budget for feature/design videos
+- **Adaptive keyframe selection** — coverage-binned, visual-salience-ranked (AKS-style), with a build-aware budget for feature/design videos and **perceptual-hash dedup** that drops near-identical frames so the VLM budget is spent on distinct content
 - **Bug *and* build** — a `feature` class plus a structured **build context** (screens, UI components, a screen-to-screen user flow, design notes, and where to implement) so an agent can implement, not just diagnose
 - **Error detection and extraction** from console, OCR, and UI state
-- **Intent-aware grounding** — error symbols *or* feature/UI nouns → ranked `file:line` (definitions preferred), so build work also lands in the right place
-- **Trust signals** — per-field confidence and a task-aware `actionability` (ready/thin/insufficient) alongside the pipeline quality level
-- **Redaction-first design** — sensitive data (passwords, tokens) redacted before models see it
+- **Corpus-aware grounding** — error symbols *or* feature/UI nouns → ranked `file:line` (definitions preferred, distinctive symbols weighted via IDF + whole-word match), respecting `.gitignore` and bounded for large repos
+- **Trust signals** — per-field confidence (with **cross-modal corroboration** — agreeing signals reinforce each other) and a task-aware `actionability` (ready/thin/insufficient) alongside the pipeline quality level
+- **Redaction-first design** — secrets (passwords, tokens, keys) **and PII** (emails, Luhn-valid card numbers, SSNs/phones, cloud keys) redacted before models see it
+- **Observability** — per-stage timings on every bundle (`stage_timings`) and live on `GET /v1/jobs/{id}`, so you can see where analysis time went
+- **Job lifecycle & delivery** — cooperative **cancellation** (`DELETE /v1/jobs/{id}`), **SSE progress** (`GET /v1/jobs/{id}/events`), a completion **webhook** (`WEBHOOK_URL`), real queue depth in `/healthz`, and **TTL retention** cleanup (`BUNDLE_TTL_DAYS`)
+- **Interaction overlay** — a click/cursor sidecar with coordinates draws a marker on the matching keyframe, so the model sees *where* the user acted
+- **Cleaner transcripts** — faster-whisper voice-activity filtering (`ASR_VAD_FILTER`) drops silence before decoding; detected/forced language is recorded
+- **OCR backstop** *(optional `ocr` extra)* — a sparse VLM OCR on an error frame gets a second, independent Tesseract reading; a no-op without the extra
 - **No data leaves your machine** — fully local, no telemetry or cloud APIs
 - **Engine-agnostic** — swap Ollama, llama.cpp, or vLLM via config only
+- **Works on *any* video** — not just bug recordings. A general video (a demo, a
+  walkthrough, a talk, a phone/real-world clip) yields a faithful **summary + a
+  timeline of key moments** (`summary`, `key_moments[]`) instead of being forced
+  into a bug shape; the bug-only fields (severity, expected/actual, repro steps)
+  stay `null` rather than carrying fabricated placeholders
 - **Structured output** — canonical Context Bundle with evidence citations
 - **Configurable response** — pick a summary **skill** *and* an **action mode**
-  (`fix`/`implement`/`design`/`explain`/`triage`/`test`/`report`/`reproduce`,
+  (`fix`/`implement`/`design`/`summarize`/`explain`/`triage`/`test`/`report`/`reproduce`,
   auto-picked from the classification), plus a machine-readable `suggested_actions`
   menu and on-demand artifact renderers (markdown / GitHub issue / test plan)
-- **Eval harness** — model-free classification / grounding / citation suites
-  (`python scripts/eval_harness.py --behavioral`) gate quality in CI
+- **Eval harness** — model-free classification / grounding / citation / **faithfulness**
+  suites (`python scripts/eval_harness.py --behavioral`) gate quality in CI; the
+  faithfulness suite proves every emitted key moment and step cites real, resolvable
+  evidence (no fabrication)
 - **Resilient** — handles no-audio videos, weak local models, low-confidence cases
 - **HTML → video (frame-by-frame)** — turn a self-contained HTML animation
   (CSS/JS/canvas) into MP4, GIF, or WebM via the `render_html_video` MCP tool or
@@ -221,6 +233,12 @@ curl -s http://127.0.0.1:8010/v1/healthz | python -m json.tool
 
 Set `FRAMESLEUTH_AUTO_INSTALL_BROWSER=0` to disable the auto-download and run
 `playwright install chromium` yourself (e.g. in a locked-down environment).
+
+> **Other optional extra — `ocr`.** For the dedicated OCR backstop on error frames,
+> `uv pip install -e ".[ocr]"` and put the `tesseract` binary on PATH
+> (`brew install tesseract` / `apt-get install tesseract-ocr`). It's a no-op when
+> absent — the VLM still does OCR; the backstop only adds a second reading. Use
+> `".[all]"` for dev + render + ocr.
 
 If `render.ready` is `false`, the `render.hint` field tells you exactly what's
 missing. The most common cause of *"Playwright is not installed"* despite

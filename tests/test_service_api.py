@@ -32,6 +32,10 @@ def test_analyze_and_report_roundtrip(tmp_path: Path) -> None:
             json.dumps({"id": job_id, "title": "test", "source_video": source_video}),
             encoding="utf-8",
         )
+        (bundle_dir / "metrics.json").write_text(
+            json.dumps({"stages": {"preprocess": 0.1, "understand": 1.2}, "degraded": []}),
+            encoding="utf-8",
+        )
         await state.store.update_job(
             job_id,
             state=JobState.DONE,
@@ -57,6 +61,8 @@ def test_analyze_and_report_roundtrip(tmp_path: Path) -> None:
         job = client.get(f"/v1/jobs/{job_id}")
         assert job.status_code == 200
         assert job.json()["state"] == "done"
+        # Per-stage metrics are surfaced to the poller for observability.
+        assert job.json()["metrics"]["stages"]["understand"] == 1.2
 
         report = client.get(f"/v1/report/{job_id}")
         assert report.status_code == 200
@@ -391,6 +397,117 @@ def test_render_html_unavailable_returns_503(tmp_path: Path, monkeypatch) -> Non
         resp = client.post("/v1/render-html", json={"html": "<h1>hi</h1>", "format": "mp4"})
         assert resp.status_code == 503
         assert resp.json()["detail"]["code"] == "render_unavailable"
+
+
+def _seed_job_sync(settings: Settings, job_id: str, state: JobState | None = None) -> None:
+    """Insert a job row directly (shared SQLite file) before the app starts."""
+    import asyncio
+
+    from framesleuth.jobs.store import JobStore
+
+    async def _seed() -> None:
+        store = JobStore(settings.DATABASE_PATH)
+        await store.initialize()
+        await store.create_job(job_id, f"h-{job_id}", "v.mp4")
+        if state is not None:
+            await store.update_job(job_id, state=state)
+
+    asyncio.run(_seed())
+
+
+def test_cancel_queued_job_sets_flag(tmp_path: Path) -> None:
+    """DELETE on an active job requests cancellation."""
+    settings = _make_settings(tmp_path)
+    settings.BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+    _seed_job_sync(settings, "q-cancel")
+    app = create_app(settings)
+    with TestClient(app) as client:
+        resp = client.delete("/v1/jobs/q-cancel")
+        assert resp.status_code == 200
+        assert resp.json()["cancel_requested"] is True
+
+        job = client.get("/v1/jobs/q-cancel").json()
+        # Still queued (a real run would transition it to cancelled at a checkpoint).
+        assert job["state"] == "queued"
+
+
+def test_cancel_terminal_job_is_409(tmp_path: Path) -> None:
+    settings = _make_settings(tmp_path)
+    settings.BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+    _seed_job_sync(settings, "q-done", state=JobState.DONE)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        resp = client.delete("/v1/jobs/q-done")
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "not_cancellable"
+
+
+def test_cancel_missing_job_is_404(tmp_path: Path) -> None:
+    app = create_app(_make_settings(tmp_path))
+    with TestClient(app) as client:
+        assert client.delete("/v1/jobs/nope").status_code == 404
+
+
+def test_job_events_stream_emits_terminal_state(tmp_path: Path) -> None:
+    """The SSE stream yields a snapshot and closes once the job is terminal."""
+    settings = _make_settings(tmp_path)
+    settings.BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+    _seed_job_sync(settings, "q-sse", state=JobState.DONE)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        resp = client.get("/v1/jobs/q-sse/events")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert "data:" in resp.text
+        assert '"state": "done"' in resp.text
+
+
+def test_webhook_fires_on_completion(tmp_path: Path, monkeypatch) -> None:
+    """A completed job POSTs a compact payload to WEBHOOK_URL."""
+    posts: list[tuple[str, dict]] = []
+
+    class _FakeSession:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        async def __aenter__(self) -> "_FakeSession":
+            return self
+
+        async def __aexit__(self, *a) -> bool:
+            return False
+
+        async def post(self, url: str, json: dict | None = None) -> None:
+            posts.append((url, json or {}))
+
+    import framesleuth.service.api as api_module
+
+    monkeypatch.setattr(api_module.aiohttp, "ClientSession", _FakeSession)
+
+    settings = _make_settings(tmp_path)
+    settings.WEBHOOK_URL = "http://example.test/hook"
+    app = create_app(settings)
+
+    async def fake_run(job_id: str, video_path: Path, source_video: str, **kwargs: object) -> Path:
+        state = app.state.app_state
+        bundle_dir = state.settings.BUNDLE_DIR / job_id
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        bundle_path = bundle_dir / "bundle.json"
+        bundle_path.write_text(
+            json.dumps({"id": job_id, "title": "demo", "action": "summarize"}), encoding="utf-8"
+        )
+        await state.store.update_job(job_id, state=JobState.DONE, bundle_path=str(bundle_path))
+        return bundle_path
+
+    with TestClient(app) as client:
+        app.state.app_state.orchestrator.run = fake_run
+        resp = client.post("/v1/analyze", files={"video": ("s.mp4", b"vid", "video/mp4")})
+        assert resp.status_code == 202
+
+    assert posts, "expected a webhook POST"
+    url, payload = posts[0]
+    assert url == "http://example.test/hook"
+    assert payload["state"] == "done"
+    assert payload["title"] == "demo"
 
 
 def test_healthz_includes_render_availability(tmp_path: Path) -> None:

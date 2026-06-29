@@ -69,6 +69,7 @@ class JobState(StrEnum):
     GROUNDING = "grounding"
     DONE = "done"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # ===== Input Contracts =====
@@ -91,6 +92,9 @@ class Transcript(BaseModel):
 
     segments: list[Segment]
     words: list[dict[str, Any]] | None = Field(None, description="Word-level timing if available")
+    language: str | None = Field(
+        default=None, description="Detected/forced ISO language code, if known"
+    )
 
 
 class UiElement(BaseModel):
@@ -193,6 +197,26 @@ class KeyframeRef(BaseModel):
     t: float = Field(..., description="Timestamp in seconds")
     shows: str = Field(..., description="What this keyframe shows")
     file: str = Field(..., description="Path relative to bundle root")
+
+
+class KeyMoment(BaseModel):
+    """A salient, timestamped moment in the recording.
+
+    The building block of a general-video *analysis*: a short, time-anchored
+    description of what happens at a point in the video (a scene change, an
+    action, a spoken point, or an error). Derived deterministically from the
+    fused video + audio timeline, so it carries an evidence citation and never
+    fabricates.
+    """
+
+    t: float = Field(..., description="Timestamp in seconds")
+    label: str = Field(..., description="Short description of what happens at this moment")
+    kind: Literal["scene", "action", "speech", "error"] = Field(
+        "scene", description="What kind of moment this is"
+    )
+    evidence: list[str] = Field(
+        default_factory=list, description="Citations like 'frame:3' or 'transcript:0:08'"
+    )
 
 
 class Redaction(BaseModel):
@@ -319,6 +343,13 @@ class ContextBundle(BaseModel):
 
     This is the primary artifact delivered to both VS Code and Chrome surfaces.
     Schema versioning enables forward migration and compatibility checks.
+
+    Bug-oriented fields (``severity``, ``priority``, ``suspected_component``,
+    ``preconditions``, ``repro_steps``, ``expected_behavior``,
+    ``actual_behavior``, ``reproducibility``) are populated only when the video
+    actually depicts a defect (a ``bug`` classification or real error evidence).
+    For a general video — a demo, a walkthrough, a real-world clip — they are
+    ``None``/empty and the deliverable is the ``summary`` plus ``key_moments``.
     """
 
     schema_version: str = "1.0"
@@ -328,22 +359,38 @@ class ContextBundle(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     classification: Classification
-    reproducibility: Reproducibility
+    reproducibility: Reproducibility | None = Field(
+        default=None, description="How reproducible the issue is (bug videos only)"
+    )
     title: str = Field(..., max_length=200)
-    severity: Severity
-    priority: Priority
-    suspected_component: str = Field(..., max_length=200)
+    severity: Severity | None = Field(default=None, description="Bug severity (bug videos only)")
+    priority: Priority | None = Field(default=None, description="Fix priority (bug videos only)")
+    suspected_component: str | None = Field(
+        default=None, max_length=200, description="Suspected component (bug videos only)"
+    )
 
     environment: dict[str, str] = Field(
-        ..., description="OS, app, version, browser from OCR or sidecar"
+        default_factory=dict, description="OS, app, version, browser from OCR or sidecar"
     )
-    preconditions: str = Field(..., description="Prerequisites for reproduction")
-    repro_steps: list[ReproStep] = Field(..., min_length=1)
-    expected_behavior: str = Field(...)
-    actual_behavior: str = Field(...)
+    preconditions: str | None = Field(
+        default=None, description="Prerequisites for reproduction (bug videos only)"
+    )
+    repro_steps: list[ReproStep] = Field(
+        default_factory=list, description="Reproduction/observed steps (empty for general video)"
+    )
+    expected_behavior: str | None = Field(
+        default=None, description="Expected behavior (bug videos only)"
+    )
+    actual_behavior: str | None = Field(
+        default=None, description="Observed behavior (bug videos only)"
+    )
 
     error_evidence: list[ErrorEvidenceItem] = Field(default_factory=list)
     keyframe_refs: list[KeyframeRef] = Field(default_factory=list)
+    key_moments: list[KeyMoment] = Field(
+        default_factory=list,
+        description="Salient timestamped moments — the analysis backbone for any video",
+    )
 
     build_context: BuildContext | None = Field(
         default=None,
@@ -364,7 +411,8 @@ class ContextBundle(BaseModel):
 
     summary: str = Field(
         default="",
-        description="Narrative summary of the recording (video + audio), per the chosen skill",
+        description="Narrative summary/analysis of the recording (video + audio), per the chosen "
+        "skill. The primary deliverable for general (non-bug) videos.",
     )
     skill: str | None = Field(
         default=None,
@@ -388,6 +436,12 @@ class ContextBundle(BaseModel):
         description="Machine-readable next-step menu (action/label/rationale/ref) for consumers",
     )
 
+    stage_timings: dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-stage wall-clock seconds (preprocess, asr, understand, summarize, "
+        "grounding…) so consumers can see where analysis time went.",
+    )
+
     transcript_path: str | None = Field(
         None, description="Path to transcript.json relative to bundle"
     )
@@ -409,15 +463,22 @@ class ContextBundle(BaseModel):
         return v
 
     def validate_claims_cited(self) -> list[str]:
-        """Validate that every claim is cited.
+        """Validate that the bundle carries a usable, cited deliverable.
+
+        A bug bundle must have reproduction steps; a general video instead carries
+        a summary and/or key moments. A bundle missing *all* of these (and a title)
+        has nothing actionable to stand on.
 
         Returns:
-            List of uncited claims (should be empty for valid bundle).
+            List of missing-deliverable keys (should be empty for a valid bundle).
         """
-        # For now, basic validation - can be expanded
-        uncited = []
+        missing: list[str] = []
         if not self.title:
-            uncited.append("title")
-        if not self.repro_steps:
-            uncited.append("repro_steps")
-        return uncited
+            missing.append("title")
+        is_bug = self.classification.label is ClassificationLabel.BUG or bool(self.error_evidence)
+        if is_bug:
+            if not self.repro_steps:
+                missing.append("repro_steps")
+        elif not (self.summary or self.key_moments):
+            missing.append("summary_or_key_moments")
+        return missing

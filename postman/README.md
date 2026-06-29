@@ -29,8 +29,9 @@ framesleuth-api            # binds 127.0.0.1:8010
      field to a file (e.g. `samples/flash_bug.mp4`). It returns `202` with a
      `job_id`; the test script saves it into the `jobId` variable automatically.
    - **Get job status** → re-run until `state` is `done` (analysis runs in the
-     background).
+     background), or **Stream job events (SSE)** to follow progress without polling.
    - **Get report / Get source video / Get preview GIF** → reuse `jobId`.
+   - **Cancel job** → request cooperative cancellation of a still-running job.
 
 ## 3. Or run headless with Newman (CI-friendly)
 
@@ -53,12 +54,14 @@ newman run postman/Framesleuth.postman_collection.json \
 
 | Request | Method + path | Notes |
 |---|---|---|
-| Health | `GET /v1/healthz` | overall + per-service (`vlm`, `coder`, `storage`); plus a `render` block reporting optional HTML→video readiness |
+| Health | `GET /v1/healthz` | overall + per-service (`vlm`, `coder`, `storage`); live `queue_depth`; plus a `render` block reporting optional HTML→video readiness |
 | List skills | `GET /v1/skills` | built-in summary styles + the default |
-| List actions | `GET /v1/actions` | built-in action modes (`fix`/`explain`/`triage`/`test`/`report`/`reproduce`) + default |
+| List actions | `GET /v1/actions` | built-in action modes (`fix`/`summarize`/`explain`/`triage`/`test`/`report`/`reproduce`) + default |
 | Analyze video | `POST /v1/analyze` | multipart: `video` (file), `intent?`, `skill?`, `system_prompt?`, `action?`, `action_prompt?`, `sidecars?`, `capture_options?`. **Async** — returns `202 {job_id, status: "queued"}`; poll **Get job status**. Idempotent on the video's SHA-256. |
-| Get job status | `GET /v1/jobs/{job_id}` | lifecycle state + progress; poll until `state` is `done` |
-| Get report | `GET /v1/report/{job_id}` | the Context Bundle (incl. `analysis_quality`); `409` until ready |
+| Get job status | `GET /v1/jobs/{job_id}` | lifecycle state + progress + per-stage `metrics`; poll until `state` is `done` |
+| Cancel job | `DELETE /v1/jobs/{job_id}` | request cooperative cancellation → job becomes `cancelled`; `409` if already terminal |
+| Stream job events | `GET /v1/jobs/{job_id}/events` | Server-Sent Events progress stream that closes on a terminal state (follow without polling) |
+| Get report | `GET /v1/report/{job_id}` | the Context Bundle (incl. `summary`, `key_moments`, `analysis_quality`); `409` until ready |
 | Get source video | `GET /v1/video/{job_id}` | streams the stored recording |
 | Get preview GIF | `GET /v1/gif/{job_id}` | animated `image/gif` preview; optional `fps`/`width`/`start`/`end`; cached on disk per params |
 | Render HTML to video | `POST /v1/render-html` | render a self-contained HTML animation to `mp4`/`gif`/`webm`; **optional** (needs `render` extra + `ffmpeg`) — `200` with the file or `503` when unavailable |
