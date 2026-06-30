@@ -79,7 +79,10 @@ framesleuth-mcp = "framesleuth.mcp_server.server:main"
 packages = ["framesleuth"]
 
 [tool.mypy]
-python_version = "3.11"
+# Type-check against 3.12, the interpreter the project is developed, tested and
+# deployed on (3.11 stays the install floor in requires-python). The pinned mypy
+# (1.7.0) cannot parse NumPy 2.x's PEP 695 stubs under a 3.11 target.
+python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
@@ -92,14 +95,27 @@ check_untyped_defs = true
 disallow_untyped_calls = true
 
 [[tool.mypy.overrides]]
+# Both the bare top-level name AND its submodules: a `module` pattern of
+# "numpy.*" does NOT match a bare `import numpy`, so without the bare entry mypy
+# would parse numpy's own stubs (and trip over 3.12-only syntax under
+# python_version 3.11). Listing both keeps these untyped integration boundaries
+# fully skipped.
 module = [
+    "cv2",
     "cv2.*",
+    "av",
     "av.*",
+    "numpy",
     "numpy.*",
+    "mcp",
     "mcp.*",
+    "aiosqlite",
     "aiosqlite.*",
+    "faster_whisper",
     "faster_whisper.*",
+    "playwright",
     "playwright.*",
+    "pytesseract",
     "pytesseract.*",
 ]
 ignore_missing_imports = true

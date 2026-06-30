@@ -30,7 +30,8 @@ def _http_get(url: str, timeout: float = 4.0) -> str | None:
     """Return the response body, or None if the endpoint isn't reachable."""
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", "replace")
+            data: bytes = resp.read()
+        return data.decode("utf-8", "replace")
     except Exception:
         return None
 

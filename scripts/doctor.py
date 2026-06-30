@@ -42,7 +42,8 @@ class Report:
 def _reach(url: str, timeout: float = 3.0) -> str | None:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
-            return r.read().decode("utf-8", "replace")
+            data: bytes = r.read()
+        return data.decode("utf-8", "replace")
     except Exception:
         return None
 
