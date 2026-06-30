@@ -395,7 +395,7 @@ def build_server(bundle_root: Path | None = None) -> FastMCP:  # noqa: C901
     async def render_html_video(
         html: str,
         format: str = "mp4",
-        duration_s: float = 5.0,
+        duration_s: float | None = None,
         fps: int = 30,
         width: int = 1280,
         height: int = 720,
@@ -406,13 +406,25 @@ def build_server(bundle_root: Path | None = None) -> FastMCP:  # noqa: C901
         designed) as a shareable clip. Captures the animation **frame-by-frame**
         (full color, no dropped frames, no quality loss) and encodes a
         color-correct H.264 MP4 / VP9 WebM / palette GIF — up to 4K, 5-60 fps.
-        Returns the absolute path to the encoded file, written under the bundle
-        directory. Requires the optional ``render`` extra (Playwright) + ``ffmpeg``.
+
+        **Omit ``duration_s`` (or pass null) to capture the WHOLE animation** — its
+        length is auto-detected from the page (CSS animations/transitions, the Web
+        Animations API, or an explicit ``window.__renderDurationMs`` hint for pure
+        canvas/requestAnimationFrame loops). Pass a number to record exactly that
+        many seconds. Returns the absolute path to the encoded file, written under
+        the bundle directory. Requires the optional ``render`` extra + ``ffmpeg``.
         """
         from framesleuth.pipeline.html_render import RenderOptions, render_html
 
         options = RenderOptions.normalized(
-            fmt=format, duration_s=duration_s, fps=fps, width=width, height=height
+            fmt=format,
+            duration_s=duration_s,
+            fps=fps,
+            width=width,
+            height=height,
+            max_duration_s=settings.RENDER_MAX_DURATION_S,
+            max_frames=settings.RENDER_MAX_FRAMES,
+            default_duration_s=settings.RENDER_DEFAULT_DURATION_S,
         )
         out_dir = root / "renders" / uuid.uuid4().hex
         path = await render_html(html, options, out_dir)

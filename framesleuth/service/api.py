@@ -467,24 +467,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:  # noqa: C901
         encoded file. Requires the optional ``render`` extra (Playwright) and
         ``ffmpeg``; returns ``503`` with an actionable message when unavailable.
         """
-        from framesleuth.pipeline.html_render import (
-            HtmlRenderError,
-            RenderOptions,
-            render_html,
-        )
+        from framesleuth.pipeline.html_render import HtmlRenderError, RenderOptions, render_html
 
         html = payload.get("html")
         if not isinstance(html, str) or not html.strip():
             raise HTTPException(
                 status_code=400, detail={"error": "Missing 'html'", "code": "missing_html"}
             )
+        # Omit duration_s (or pass null) to capture the WHOLE animation — its length
+        # is auto-detected. A value records exactly that window.
+        raw_duration = payload.get("duration_s")
         try:
             options = RenderOptions.normalized(
                 fmt=str(payload.get("format", "mp4")),
-                duration_s=float(payload.get("duration_s", 5.0)),
+                duration_s=None if raw_duration is None else float(raw_duration),
                 fps=int(payload.get("fps", 30)),
                 width=int(payload.get("width", 1280)),
                 height=int(payload.get("height", 720)),
+                max_duration_s=settings.RENDER_MAX_DURATION_S,
+                max_frames=settings.RENDER_MAX_FRAMES,
+                default_duration_s=settings.RENDER_DEFAULT_DURATION_S,
             )
         except (HtmlRenderError, ValueError, TypeError) as exc:
             raise HTTPException(

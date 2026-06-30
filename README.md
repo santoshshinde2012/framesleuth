@@ -198,14 +198,18 @@ MCP server + local HTTP API
   faithfulness suite proves every emitted key moment and step cites real, resolvable
   evidence (no fabrication)
 - **Resilient** — handles no-audio videos, weak local models, low-confidence cases
-- **HTML → video (frame-by-frame)** — turn a self-contained HTML animation
-  (CSS/JS/canvas) into MP4, GIF, or WebM via the `render_html_video` MCP tool or
-  `POST /v1/render-html`. Captures the animation **frame-by-frame** under a paused
-  virtual clock and encodes a color-correct H.264 MP4 (`yuv420p`+`bt709`,
+- **HTML → video (frame-by-frame, whole animation)** — turn a self-contained HTML
+  animation (CSS/JS/canvas) into MP4, GIF, or WebM via the `render_html_video` MCP
+  tool or `POST /v1/render-html`. Captures the animation **frame-by-frame** under a
+  paused virtual clock and encodes a color-correct H.264 MP4 (`yuv420p`+`bt709`,
   near-lossless) — **full color, no dropped frames, no quality loss** (up to 4K,
-  5–60 fps). **Included by default in the Docker image** (headless Chromium +
-  ffmpeg). For the direct (non-Docker) path, add the `render` extra (see below);
-  returns `503` with an actionable message when unavailable.
+  5–60 fps). **Omit the duration and the *whole* animation is captured** — its
+  length is auto-detected (CSS animations/transitions, Web Animations API, or a
+  `window.__renderDurationMs` hint for canvas loops); bounded by
+  `RENDER_MAX_DURATION_S` / `RENDER_MAX_FRAMES` (raise for very long clips).
+  **Included by default in the Docker image** (headless Chromium + ffmpeg). For the
+  direct (non-Docker) path, add the `render` extra (see below); returns `503` with
+  an actionable message when unavailable.
 
 ### Enable & troubleshoot HTML → video
 
@@ -316,5 +320,5 @@ Network Access preflight — so both a capture extension and the "Try it" widget
 framesleuth.com work against a locally running backend with no extra setup. The agent stays
 bound to loopback; CORS only controls which browser origins may read its responses.
 
-**Status:** Backend + pipeline + MCP server completed.  
+**Status:** Backend + pipeline + MCP server completed.
 **Questions?** Open an issue or check [runbook.md](runbook.md) for common questions.

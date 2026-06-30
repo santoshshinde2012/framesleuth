@@ -26,6 +26,7 @@ import asyncio
 import base64
 import contextlib
 import importlib.metadata as metadata
+import math
 import os
 import shutil
 import subprocess
@@ -46,11 +47,15 @@ logger = get_logger("pipeline.html_render")
 
 SUPPORTED_FORMATS: tuple[str, ...] = ("mp4", "gif", "webm")
 
-# Guard rails so a caller cannot ask for a ten-minute render. Resolution goes up
-# to 4K so exports are crisp; duration stays bounded since frame-by-frame capture
-# materializes one lossless PNG per frame (duration x fps images).
+# Guard rails. Resolution goes up to 4K so exports are crisp. Duration is no longer
+# capped at a tight 30 s — the whole animation is captured (auto-detected when the
+# caller omits a duration). The real safety bound is the total frame count
+# (duration x fps), since frame-by-frame capture materializes one lossless PNG per
+# frame; ``_MAX_FRAMES`` keeps a long/high-fps/high-res render from exhausting disk.
 _MIN_DURATION_S = 0.5
-_MAX_DURATION_S = 30.0
+_MAX_DURATION_S = 300.0
+_MAX_FRAMES = 18000
+_DEFAULT_DURATION_S = 5.0
 _MIN_FPS = 5
 _MAX_FPS = 60
 _GIF_MAX_FPS = 25
@@ -74,33 +79,51 @@ def _clamp(value: float, lo: float, hi: float) -> float:
 
 @dataclass(frozen=True)
 class RenderOptions:
-    """Normalized, clamped parameters for one HTML render."""
+    """Normalized, clamped parameters for one HTML render.
+
+    ``duration_s`` is ``None`` to capture the **whole animation** — its length is
+    auto-detected at render time. A concrete value records exactly that window.
+    ``max_duration_s`` / ``max_frames`` bound the work; ``default_duration_s`` is the
+    fallback used only when nothing declarative is detectable.
+    """
 
     fmt: str = "mp4"
-    duration_s: float = 5.0
+    duration_s: float | None = None
     fps: int = 30
     width: int = 1280
     height: int = 720
+    max_duration_s: float = _MAX_DURATION_S
+    max_frames: int = _MAX_FRAMES
+    default_duration_s: float = _DEFAULT_DURATION_S
 
     @classmethod
     def normalized(
         cls,
         *,
         fmt: str = "mp4",
-        duration_s: float = 5.0,
+        duration_s: float | None = None,
         fps: int = 30,
         width: int = 1280,
         height: int = 720,
+        max_duration_s: float = _MAX_DURATION_S,
+        max_frames: int = _MAX_FRAMES,
+        default_duration_s: float = _DEFAULT_DURATION_S,
     ) -> RenderOptions:
         fmt = (fmt or "mp4").lower()
         if fmt not in SUPPORTED_FORMATS:
             raise HtmlRenderError(f"format must be one of {', '.join(SUPPORTED_FORMATS)}")
+        cap = max(_MIN_DURATION_S, float(max_duration_s))
+        # None => auto-detect the animation's full length at capture time.
+        resolved = None if duration_s is None else _clamp(float(duration_s), _MIN_DURATION_S, cap)
         return cls(
             fmt=fmt,
-            duration_s=_clamp(float(duration_s), _MIN_DURATION_S, _MAX_DURATION_S),
+            duration_s=resolved,
             fps=int(_clamp(float(fps), _MIN_FPS, _MAX_FPS)),
             width=int(_clamp(float(width), _MIN_DIM, _MAX_WIDTH)),
             height=int(_clamp(float(height), _MIN_DIM, _MAX_HEIGHT)),
+            max_duration_s=cap,
+            max_frames=max(1, int(max_frames)),
+            default_duration_s=_clamp(float(default_duration_s), _MIN_DURATION_S, cap),
         )
 
 
@@ -116,6 +139,105 @@ def _ffmpeg_path() -> str:
 def _frame_count(duration_s: float, fps: int) -> int:
     """Number of lossless frames to capture for a duration at fps (at least 1)."""
     return max(1, round(duration_s * fps))
+
+
+def _bounded_frame_count(duration_s: float, fps: int, max_frames: int) -> tuple[int, bool]:
+    """Frame count for ``duration`` at ``fps``, capped at ``max_frames``.
+
+    Returns ``(n, truncated)`` — ``truncated`` is ``True`` when the cap reduced the
+    count, so the caller can warn that the tail of a very long render was dropped.
+    """
+    n = _frame_count(duration_s, fps)
+    if n > max_frames:
+        return max(1, max_frames), True
+    return n, False
+
+
+# Detect an animation's full length from the page: an explicit hint
+# (``window.__renderDurationMs`` or ``<body data-render-duration-ms>``) wins; else
+# the longest CSS animation/transition (one cycle for infinite loops) and Web
+# Animations API timeline. Returns milliseconds, or 0 when nothing is detectable
+# (e.g. a pure canvas/requestAnimationFrame loop with no hint). Defensive — any
+# error yields 0 so the caller falls back to the default duration.
+_DURATION_DETECT_JS = r"""
+() => {
+  try {
+    const hint = window.__renderDurationMs;
+    if (typeof hint === 'number' && isFinite(hint) && hint > 0) return hint;
+    const dataHint = (document.body && document.body.dataset)
+      ? parseFloat(document.body.dataset.renderDurationMs) : NaN;
+    if (isFinite(dataHint) && dataHint > 0) return dataHint;
+
+    const toMs = (v) => {
+      if (!v) return 0;
+      v = String(v).trim();
+      if (v.endsWith('ms')) return parseFloat(v) || 0;
+      if (v.endsWith('s')) return (parseFloat(v) || 0) * 1000;
+      return parseFloat(v) || 0;
+    };
+    let max = 0;
+    const at = (arr, i) => (arr[i] !== undefined ? arr[i] : arr[0]);
+
+    for (const el of document.querySelectorAll('*')) {
+      const cs = getComputedStyle(el);
+      const aDur = (cs.animationDuration || '').split(',');
+      const aDel = (cs.animationDelay || '').split(',');
+      const aIt = (cs.animationIterationCount || '1').split(',');
+      for (let i = 0; i < aDur.length; i++) {
+        const d = toMs(aDur[i]);
+        if (d <= 0) continue;
+        const delay = toMs(at(aDel, i));
+        const itRaw = String(at(aIt, i) || '1').trim();
+        const it = itRaw === 'infinite' ? 1 : (parseFloat(itRaw) || 1);
+        max = Math.max(max, delay + d * it);
+      }
+      const tDur = (cs.transitionDuration || '').split(',');
+      const tDel = (cs.transitionDelay || '').split(',');
+      for (let i = 0; i < tDur.length; i++) {
+        const d = toMs(tDur[i]);
+        if (d <= 0) continue;
+        max = Math.max(max, toMs(at(tDel, i)) + d);
+      }
+    }
+
+    if (document.getAnimations) {
+      for (const a of document.getAnimations()) {
+        const t = (a.effect && a.effect.getComputedTiming) ? a.effect.getComputedTiming() : null;
+        if (!t) continue;
+        const dur = (typeof t.duration === 'number' && isFinite(t.duration)) ? t.duration : 0;
+        const inf = (t.iterations === Infinity || !isFinite(t.iterations));
+        const iter = inf ? 1 : (t.iterations || 1);
+        max = Math.max(max, (t.delay || 0) + dur * iter + (t.endDelay || 0));
+      }
+    }
+    return max;
+  } catch (e) {
+    return 0;
+  }
+}
+"""
+
+
+async def _detect_duration_ms(page: Any) -> float:
+    """Evaluate the detection script on the page; return milliseconds (0 if none)."""
+    try:
+        value = await page.evaluate(_DURATION_DETECT_JS)
+        ms = float(value)
+    except Exception as exc:  # any page/eval error → fall back to the default
+        logger.debug("Animation duration detection failed: %s", exc)
+        return 0.0
+    return ms if ms > 0 and math.isfinite(ms) else 0.0
+
+
+async def _effective_duration_s(page: Any, opts: RenderOptions) -> float:
+    """Resolve the capture window: the caller's value, or the detected animation length."""
+    if opts.duration_s is not None:
+        return opts.duration_s
+    detected = (await _detect_duration_ms(page)) / 1000.0
+    duration = detected if detected > 0 else opts.default_duration_s
+    if detected > 0:
+        logger.info("Auto-detected animation length: %.2fs", detected)
+    return _clamp(duration, _MIN_DURATION_S, opts.max_duration_s)
 
 
 def _frames_glob(frames_dir: Path) -> str:
@@ -353,7 +475,6 @@ async def _capture_frames(html: str, opts: RenderOptions, frames_dir: Path) -> i
     """
     frames_dir.mkdir(parents=True, exist_ok=True)
     async_playwright = _import_playwright()
-    n = _frame_count(opts.duration_s, opts.fps)
     frame_ms = 1000.0 / opts.fps
     size: ViewportSize = {"width": opts.width, "height": opts.height}
 
@@ -368,6 +489,19 @@ async def _capture_frames(html: str, opts: RenderOptions, frames_dir: Path) -> i
             with contextlib.suppress(Exception):
                 await page.evaluate("document.fonts && document.fonts.ready")
             await page.wait_for_timeout(60)
+            # Resolve how long to record — auto-detect the whole animation when the
+            # caller didn't pin a duration — then bound the frame count for safety.
+            duration_s = await _effective_duration_s(page, opts)
+            n, truncated = _bounded_frame_count(duration_s, opts.fps, opts.max_frames)
+            if truncated:
+                logger.warning(
+                    "Render capped at %d frames (%.1fs @ %dfps exceeds RENDER_MAX_FRAMES=%d); "
+                    "raise the cap or lower fps/resolution to capture the full tail.",
+                    n,
+                    duration_s,
+                    opts.fps,
+                    opts.max_frames,
+                )
             # Freeze the clock, then step one frame budget at a time.
             await cdp.send("Emulation.setVirtualTimePolicy", {"policy": "pause"})
             for i in range(n):
@@ -405,8 +539,9 @@ async def _record_webm(html: str, opts: RenderOptions, out_dir: Path) -> Path:
         page = await context.new_page()
         try:
             await page.set_content(html, wait_until="load")
-            # Let the animation play for the requested window.
-            await page.wait_for_timeout(int(opts.duration_s * 1000))
+            # Let the animation play for its full (auto-detected or requested) window.
+            duration_s = await _effective_duration_s(page, opts)
+            await page.wait_for_timeout(int(duration_s * 1000))
         finally:
             # Closing the context flushes the recording to disk.
             await context.close()

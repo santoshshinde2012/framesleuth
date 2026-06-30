@@ -433,7 +433,7 @@
     ],
     "body": {
      "mode": "raw",
-     "raw": "{\n  \"html\": \"<!doctype html><html><head><style>html,body{margin:0;height:100%;background:#071513;display:grid;place-items:center}.r{width:160px;height:160px;border-radius:50%;border:10px solid rgba(236,91,42,.2);border-top-color:#ec5b2a;animation:s 1.2s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style></head><body><div class=\\\"r\\\"></div></body></html>\",\n  \"format\": \"mp4\",\n  \"duration_s\": 4,\n  \"fps\": 30,\n  \"width\": 1280,\n  \"height\": 720\n}"
+     "raw": "{\n  \"html\": \"<!doctype html><html><head><style>html,body{margin:0;height:100%;background:#071513;display:grid;place-items:center}.r{width:160px;height:160px;border-radius:50%;border:10px solid rgba(236,91,42,.2);border-top-color:#ec5b2a;animation:s 1.2s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style></head><body><div class=\\\"r\\\"></div></body></html>\",\n  \"format\": \"mp4\",\n  \"fps\": 30,\n  \"width\": 1280,\n  \"height\": 720\n}"
     },
     "url": {
      "raw": "{{baseUrl}}/v1/render-html",
@@ -445,7 +445,7 @@
       "render-html"
      ]
     },
-    "description": "Renders a self-contained HTML animation (CSS/JS/canvas) to a clip and returns the encoded file (`video/mp4`, `image/gif`, or `video/webm`). `format` is one of `mp4|gif|webm`; `duration_s`/`fps`/`width`/`height` are clamped to safe ranges.\n\n**Optional capability** — needs the `render` extra (Playwright) plus `ffmpeg`. Returns `400` for bad input, and `503` with an actionable message when render is unavailable. Check `GET /v1/healthz` → `render.ready` first."
+    "description": "Renders a self-contained HTML animation (CSS/JS/canvas) to a clip and returns the encoded file (`video/mp4`, `image/gif`, or `video/webm`). `format` is one of `mp4|gif|webm`. **Omit `duration_s` (as this example does) to capture the WHOLE animation** — its length is auto-detected (here, one full 1.2 s rotation of the infinite spinner); pass a number to record exactly that many seconds. `fps`/`width`/`height` are clamped to safe ranges.\n\n**Optional capability** — needs the `render` extra (Playwright) plus `ffmpeg`. Returns `400` for bad input, and `503` with an actionable message when render is unavailable. Check `GET /v1/healthz` → `render.ready` first."
    },
    "event": [
     {

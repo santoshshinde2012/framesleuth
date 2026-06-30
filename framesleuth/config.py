@@ -146,6 +146,21 @@ class Settings(BaseSettings):
     GIF_WIDTH: int = 640
     GIF_MAX_DURATION_S: float = 30.0
 
+    # === HTML → video rendering ===
+    # The WHOLE animation is captured: omit a duration on /v1/render-html (or the
+    # render_html_video MCP tool) and Framesleuth detects the animation's natural
+    # length (CSS animations/transitions, Web Animations API, or an explicit
+    # window.__renderDurationMs hint) and records all of it. These bound the work:
+    #   - RENDER_MAX_DURATION_S caps the captured window (generous, not the old 30 s).
+    #   - RENDER_MAX_FRAMES is the real safety guard — total PNGs = duration x fps —
+    #     so a long, high-fps, high-res render cannot exhaust the disk. Raise both
+    #     for genuinely long animations.
+    #   - RENDER_DEFAULT_DURATION_S is used only when nothing declarative is found
+    #     (e.g. a pure <canvas>/requestAnimationFrame loop with no hint).
+    RENDER_MAX_DURATION_S: float = 300.0
+    RENDER_MAX_FRAMES: int = 18000
+    RENDER_DEFAULT_DURATION_S: float = 5.0
+
     # === Storage ===
     BUNDLE_DIR: Path = Path("./bug-reports")
     DATABASE_PATH: Path = Path("./bug-reports/jobs.db")

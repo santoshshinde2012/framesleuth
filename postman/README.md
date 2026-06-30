@@ -64,7 +64,7 @@ newman run postman/Framesleuth.postman_collection.json \
 | Get report | `GET /v1/report/{job_id}` | the Context Bundle (incl. `summary`, `key_moments`, `analysis_quality`); `409` until ready |
 | Get source video | `GET /v1/video/{job_id}` | streams the stored recording |
 | Get preview GIF | `GET /v1/gif/{job_id}` | animated `image/gif` preview; optional `fps`/`width`/`start`/`end`; cached on disk per params |
-| Render HTML to video | `POST /v1/render-html` | render a self-contained HTML animation to `mp4`/`gif`/`webm`; **optional** (needs `render` extra + `ffmpeg`) — `200` with the file or `503` when unavailable |
+| Render HTML to video | `POST /v1/render-html` | render a self-contained HTML animation to `mp4`/`gif`/`webm`; **omit `duration_s` to capture the whole animation** (length auto-detected); **optional** (needs `render` extra + `ffmpeg`) — `200` with the file or `503` when unavailable |
 
 > **Idempotency gotcha:** re-posting the *same bytes* returns the existing job
 > (`idempotent: true`) without re-running. Use a different file, or clear the

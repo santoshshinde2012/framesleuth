@@ -366,6 +366,12 @@ check `render.python` (the interpreter it actually uses) and reinstall there. To
 provision the browser yourself instead of auto-download, set
 `FRAMESLEUTH_AUTO_INSTALL_BROWSER=0` and run `playwright install chromium`.
 
+> **Capture the whole animation.** Omit `duration_s` on `POST /v1/render-html` (or
+> the `render_html_video` MCP tool) and the animation's length is auto-detected — no
+> need to guess. For a pure `<canvas>`/`requestAnimationFrame` loop with no
+> declarative timing, set `window.__renderDurationMs = <ms>` in the page. Raise
+> `RENDER_MAX_DURATION_S` / `RENDER_MAX_FRAMES` in `.env` for very long animations.
+
 ---
 
 ## Testing the system

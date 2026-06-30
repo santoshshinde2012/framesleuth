@@ -17,6 +17,9 @@ from framesleuth.pipeline.html_render import (
     HtmlRenderError,
     RenderOptions,
     _auto_install_enabled,
+    _bounded_frame_count,
+    _detect_duration_ms,
+    _effective_duration_s,
     _frame_count,
     _gif_args,
     _mp4_args,
@@ -24,6 +27,20 @@ from framesleuth.pipeline.html_render import (
     render_availability,
     render_html,
 )
+
+
+class _FakePage:
+    """Minimal page double whose ``evaluate`` returns (or raises) a canned value."""
+
+    def __init__(self, value: object) -> None:
+        self._value = value
+        self.evaluated = False
+
+    async def evaluate(self, _script: str) -> object:
+        self.evaluated = True
+        if isinstance(self._value, Exception):
+            raise self._value
+        return self._value
 
 
 def test_auto_install_browser_defaults_on_and_is_opt_out(monkeypatch) -> None:
@@ -40,21 +57,113 @@ def test_auto_install_browser_defaults_on_and_is_opt_out(monkeypatch) -> None:
 def test_defaults_are_sane() -> None:
     opts = RenderOptions.normalized()
     assert opts.fmt == "mp4"
-    assert opts.duration_s == 5.0
+    assert opts.duration_s is None  # None = capture the whole animation (auto-detect)
     assert opts.fps == 30
     assert opts.width == 1280
     assert opts.height == 720
 
 
+def test_omitting_duration_means_auto_detect() -> None:
+    """No duration → auto-detect the whole animation; a value pins the window."""
+    assert RenderOptions.normalized(duration_s=None).duration_s is None
+    assert RenderOptions.normalized(duration_s=12.0).duration_s == 12.0
+
+
 def test_normalized_clamps_out_of_range_values() -> None:
-    """A caller cannot ask for a 120fps, ten-minute render; 4K is the resolution cap."""
+    """fps/resolution are capped; duration is capped at the (configurable) max."""
     opts = RenderOptions.normalized(
-        fmt="webm", duration_s=600.0, fps=240, width=99999, height=99999
+        fmt="webm", duration_s=99999.0, fps=240, width=99999, height=99999
     )
-    assert opts.duration_s == 30.0  # capped at _MAX_DURATION_S
+    assert opts.duration_s == 300.0  # capped at the default _MAX_DURATION_S (was 30)
     assert opts.fps == 60  # capped at _MAX_FPS
     assert opts.width == 3840  # capped at _MAX_WIDTH (4K)
     assert opts.height == 2160  # capped at _MAX_HEIGHT (4K)
+
+
+def test_duration_cap_is_configurable() -> None:
+    """A longer animation is allowed when the caller raises the cap."""
+    opts = RenderOptions.normalized(duration_s=120.0, max_duration_s=600.0)
+    assert opts.duration_s == 120.0  # no longer clamped to 30
+    capped = RenderOptions.normalized(duration_s=1000.0, max_duration_s=600.0)
+    assert capped.duration_s == 600.0
+
+
+def test_bounded_frame_count_caps_total_frames() -> None:
+    """The frame-count guard bounds disk use regardless of duration x fps."""
+    n, truncated = _bounded_frame_count(10.0, 30, max_frames=18000)
+    assert (n, truncated) == (300, False)
+    n, truncated = _bounded_frame_count(600.0, 60, max_frames=18000)  # 36000 requested
+    assert n == 18000 and truncated is True
+
+
+# --------------------------------------------------------------------------- #
+# Auto-duration resolution (the "capture the whole animation" logic)
+# --------------------------------------------------------------------------- #
+
+
+async def test_detect_duration_ms_parses_a_number() -> None:
+    assert await _detect_duration_ms(_FakePage(1200)) == 1200.0
+
+
+async def test_detect_duration_ms_is_zero_on_bad_or_error_value() -> None:
+    """A non-number, non-finite, zero, or thrown error all mean 'undetectable'."""
+    assert await _detect_duration_ms(_FakePage("nope")) == 0.0
+    assert await _detect_duration_ms(_FakePage(float("inf"))) == 0.0
+    assert await _detect_duration_ms(_FakePage(0)) == 0.0
+    assert await _detect_duration_ms(_FakePage(RuntimeError("boom"))) == 0.0
+
+
+async def test_effective_duration_uses_explicit_value_without_probing() -> None:
+    """A pinned duration is used verbatim — the page is never evaluated."""
+    opts = RenderOptions.normalized(duration_s=7.0)
+    page = _FakePage(RuntimeError("evaluate must not be called"))
+    assert await _effective_duration_s(page, opts) == 7.0
+    assert page.evaluated is False
+
+
+async def test_effective_duration_auto_detects_full_length() -> None:
+    """With no pinned duration, the detected animation length (ms→s) is used."""
+    opts = RenderOptions.normalized(duration_s=None, default_duration_s=5.0)
+    assert await _effective_duration_s(_FakePage(2500), opts) == 2.5
+
+
+async def test_effective_duration_falls_back_to_default_when_undetectable() -> None:
+    """A pure canvas loop (nothing detected) falls back to the configured default."""
+    opts = RenderOptions.normalized(duration_s=None, default_duration_s=4.0)
+    assert await _effective_duration_s(_FakePage(0), opts) == 4.0
+
+
+async def test_effective_duration_clamps_detected_to_max() -> None:
+    opts = RenderOptions.normalized(duration_s=None, max_duration_s=3.0)
+    assert await _effective_duration_s(_FakePage(99_999), opts) == 3.0
+
+
+@pytest.mark.integration
+async def test_render_captures_whole_animation_via_auto_duration(tmp_path: Path) -> None:
+    """End-to-end: a 1 s CSS animation auto-detects to ~1 s and captures all frames.
+
+    Skipped unless the optional ``render`` extra (Playwright + Chromium) is present,
+    so the unit suite stays dependency-free while CI with the extra exercises the
+    in-browser duration detection and frame capture for real.
+    """
+    info = render_availability()
+    if not (info["playwright"] and info["chromium"]):
+        pytest.skip("render extra (Playwright + Chromium) not installed")
+
+    from framesleuth.pipeline.html_render import _capture_frames
+
+    html = (
+        "<!doctype html><html><head><style>"
+        "@keyframes f{from{opacity:1}to{opacity:0}}"
+        ".b{width:100px;height:100px;background:#ec5b2a;animation:f 1s linear 1}"
+        "</style></head><body><div class='b'></div></body></html>"
+    )
+    opts = RenderOptions.normalized(duration_s=None, fps=10)  # auto → ~1 s
+    n = await _capture_frames(html, opts, tmp_path / "frames")
+
+    # ~1 s at 10 fps ≈ 10 frames (slack for the first frame + rounding).
+    assert 8 <= n <= 13
+    assert len(list((tmp_path / "frames").glob("*.png"))) == n
 
 
 def test_normalized_allows_1080p() -> None:

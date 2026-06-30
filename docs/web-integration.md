@@ -165,8 +165,10 @@ every supported skill, action, renderer, endpoint, and MCP tool.
 Separate from the analyze loop, the backend can render a self-contained HTML
 animation (CSS/JS/canvas) to a clip **frame-by-frame** — full color, no dropped
 frames, no quality loss (up to 4K, 5–60 fps): `POST /v1/render-html` with
-`{html, format: mp4|gif|webm, duration_s, fps, width, height}` returns the encoded
-file. It's an **optional capability** (needs the `render` extra + `ffmpeg`) and
+`{html, format: mp4|gif|webm, duration_s?, fps, width, height}` returns the encoded
+file. **Omit `duration_s` to capture the whole animation** (length auto-detected; a
+`window.__renderDurationMs` hint covers pure canvas loops). It's an **optional
+capability** (needs the `render` extra + `ffmpeg`) and
 returns `503` when unavailable — gate your UI on `GET /v1/healthz` → `render.ready`.
 Proxy it the same way as the rest (browser → your backend → Framesleuth, loopback
 only); binary responses pass straight through.

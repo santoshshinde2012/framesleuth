@@ -141,10 +141,21 @@ the animation **frame-by-frame** in headless Chromium using a paused virtual clo
 PNG at an exact timestamp — **no dropped frames and no color loss**, unlike screen
 recording. The PNG sequence is then encoded to a color-correct **H.264 MP4**
 (`yuv420p` + `bt709`, near-lossless CRF, `+faststart`), **VP9 WebM**, or a
-palette-based **GIF**. Output up to **4K**, **5–60 fps**, ≤ 30 s. If deterministic
-capture is unavailable on the running Chromium it falls back to real-time recording.
-Optional capability — needs the `render` extra (Playwright) + `ffmpeg`; Chromium
-auto-downloads on first use.
+palette-based **GIF**. Output up to **4K**, **5–60 fps**.
+
+**The whole animation is captured.** Omit `duration_s` (or pass `null`) and the
+renderer **auto-detects the animation's full length** — the longest CSS
+animation/transition (one cycle for infinite loops) and Web Animations API
+timeline — and records all of it. For a pure `<canvas>`/`requestAnimationFrame`
+animation (no declarative timing), set `window.__renderDurationMs = <ms>` (or
+`<body data-render-duration-ms="…">`) and that exact length is used. Passing a
+`duration_s` records exactly that window instead. The capture window is bounded by
+`RENDER_MAX_DURATION_S` (default 300 s) and the total frame count by
+`RENDER_MAX_FRAMES` (default 18000 = duration × fps) so a long, high-fps, high-res
+render can't exhaust disk — raise both for genuinely long animations. If
+deterministic capture is unavailable on the running Chromium it falls back to
+real-time recording. Optional capability — needs the `render` extra (Playwright) +
+`ffmpeg`; Chromium auto-downloads on first use.
 
 ---
 
@@ -165,7 +176,7 @@ expose it to the browser/internet directly.
 | `GET /v1/report/{id}` | The full Context Bundle. |
 | `GET /v1/video/{id}` | The stored source recording (correct media type). |
 | `GET /v1/gif/{id}` | An animated GIF preview of the recording (`image/gif`). Optional `fps`/`width`/`start`/`end` query params (clamped); rendered on demand and cached on disk per parameter set. |
-| `POST /v1/render-html` | Render an HTML document (CSS/JS/canvas animation) to a clip — **frame-by-frame, full color, no quality loss** (up to 4K, 5–60 fps). JSON body `{html, format: mp4\|gif\|webm, duration_s, fps, width, height}`; returns the encoded file. Optional capability — needs the `render` extra (Playwright) + `ffmpeg`; returns `503` with an actionable message when unavailable. Check `GET /v1/healthz` → `render.ready` first. |
+| `POST /v1/render-html` | Render an HTML document (CSS/JS/canvas animation) to a clip — **frame-by-frame, full color, no quality loss** (up to 4K, 5–60 fps). JSON body `{html, format: mp4\|gif\|webm, duration_s?, fps, width, height}`. **Omit `duration_s` to capture the whole animation** (length auto-detected). Returns the encoded file. Optional capability — needs the `render` extra (Playwright) + `ffmpeg`; returns `503` with an actionable message when unavailable. Check `GET /v1/healthz` → `render.ready` first. |
 
 ---
 
