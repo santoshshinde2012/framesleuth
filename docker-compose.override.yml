@@ -1,0 +1,68 @@
+# Optional Ollama stack for one-command local development.
+#
+# Docker Compose loads this file automatically with `docker compose up`, adding:
+#   1. ollama      - local model server on the internal Compose network.
+#   2. ollama-init - one-shot model pull into the shared Ollama volume.
+#   3. backend     - dependency and model URLs wired to the Compose Ollama server.
+#
+# The Ollama port is not published to the host, so it will not conflict with a
+# native Ollama already running on :11434. To inspect it from the host, add a
+# mapping on a free port, e.g. ports: ["11435:11434"].
+#
+# NVIDIA GPU: uncomment the deploy block on the ollama service.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: framesleuth-ollama
+    expose:
+      - "11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 40 # up to ~3 min for the server to come up
+      start_period: 10s
+    restart: unless-stopped
+    # --- NVIDIA GPU (Linux + nvidia-container-toolkit): uncomment for speed ---
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # One-shot: pulls the models into the shared ollama volume, then exits 0.
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: framesleuth-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Pulling models (first run downloads ~11 GB)..."
+        ollama pull qwen2.5vl
+        ollama pull qwen2.5-coder:7b
+        echo "Models ready."
+    restart: "no"
+
+  backend:
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+    environment:
+      - VLM_URL=http://ollama:11434
+      - VLM_MODEL=qwen2.5vl
+      - CODER_URL=http://ollama:11434
+      - CODER_MODEL=qwen2.5-coder:7b
+
+volumes:
+  ollama_data:
+    driver: local
