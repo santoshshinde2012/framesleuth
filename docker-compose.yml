@@ -1,95 +1,44 @@
-# Framesleuth — one-command local stack.
+# Framesleuth backend-only Docker Compose stack.
 #
-#   docker compose up        # first run pulls the models (~11 GB) automatically
+#   docker compose up        # also loads docker-compose.override.yml when present
 #   curl http://127.0.0.1:8010/v1/healthz
 #
-# What comes up, with no manual steps:
-#   1. ollama        — local model server (OpenAI-compatible).
-#   2. ollama-init   — one-shot: pulls the vision + coder models, then exits.
-#   3. backend       — Framesleuth API on http://127.0.0.1:8010, started only
-#                      once the models are ready.
+# This base file contains only the Framesleuth API and shared backend data. The
+# default override file adds the optional Ollama server, model-pull init job, and
+# Ollama model volume for the one-command local stack.
 #
-# Everything runs locally; nothing leaves your machine. On a CPU-only host (incl.
-# Docker on macOS, which can't use the Mac GPU) the vision model is slow but
-# works — for speed on macOS use the native Ollama app instead (see the README).
-# NVIDIA GPU: uncomment the `deploy:` block on the `ollama` service.
+# To run only the backend against a native/external model server:
 #
-# Note: this Ollama runs ONLY on the internal compose network (its port is not
-# published to the host), so it never clashes with a native Ollama you may
-# already run on :11434. The only host port published is the API on :8010.
+#   docker compose -f docker-compose.yml up
+#
+# By default, backend-only mode reaches native Ollama on the host at
+# http://host.docker.internal:11434. Override VLM_URL/CODER_URL as needed.
 
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: framesleuth-ollama
-    # Internal only — the backend reaches it at http://ollama:11434 over the
-    # compose network. To inspect it from the host, add a mapping on a FREE port,
-    # e.g.  ports: ["11435:11434"]  (avoid 11434 if native Ollama uses it).
-    expose:
-      - "11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 5s
-      timeout: 5s
-      retries: 40 # up to ~3 min for the server to come up
-      start_period: 10s
-    restart: unless-stopped
-    # --- NVIDIA GPU (Linux + nvidia-container-toolkit): uncomment for speed ---
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-
-  # One-shot: pulls the models into the shared ollama volume, then exits 0.
-  ollama-init:
-    image: ollama/ollama:latest
-    container_name: framesleuth-ollama-init
-    depends_on:
-      ollama:
-        condition: service_healthy
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        echo "Pulling models (first run downloads ~11 GB)…"
-        ollama pull qwen2.5vl
-        ollama pull qwen2.5-coder:7b
-        echo "Models ready."
-    restart: "no"
-
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     image: framesleuth-backend:latest
-    pull_policy: build # locally built — don't try to pull from a registry
+    pull_policy: build # locally built; don't try to pull from a registry
     container_name: framesleuth-backend
-    depends_on:
-      ollama-init:
-        condition: service_completed_successfully
     ports:
-      - "8010:8000" # host 8010 → container 8000
+      - "8010:8000" # host 8010 -> container 8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - BACKEND_HOST=0.0.0.0
       - LOG_LEVEL=INFO
-      # Vision + coder both served by the local Ollama container.
-      - VLM_URL=http://ollama:11434
-      - VLM_MODEL=qwen2.5vl
-      - CODER_URL=http://ollama:11434
-      - CODER_MODEL=qwen2.5-coder:7b
+      # Backend-only mode expects a model server outside Compose.
+      - VLM_URL=${VLM_URL:-http://host.docker.internal:11434}
+      - VLM_MODEL=${VLM_MODEL:-qwen2.5vl}
+      - CODER_URL=${CODER_URL:-http://host.docker.internal:11434}
+      - CODER_MODEL=${CODER_MODEL:-qwen2.5-coder:7b}
     volumes:
       - ./bug-reports:/app/bug-reports # analysis output persists on the host
       - hf_cache:/root/.cache/huggingface # faster-whisper cache, reused across runs
     restart: unless-stopped
 
 volumes:
-  ollama_data:
-    driver: local
   hf_cache:
     driver: local

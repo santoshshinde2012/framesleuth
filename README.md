@@ -36,10 +36,12 @@ cd framesleuth
 docker compose up            # or: ./scripts/dev_up.sh
 ```
 
-The **first** run automatically pulls the vision + coder models (`qwen2.5vl` and
-`qwen2.5-coder:7b`, ~11 GB total) into a Docker volume, then starts the backend on
-`http://127.0.0.1:8010`. Subsequent runs are instant. It's ready when the health
-check reports `healthy`:
+Compose loads `docker-compose.override.yml` automatically; that override adds
+the Ollama server, model-pull job, and Ollama model volume. The **first** run
+automatically pulls the vision + coder models (`qwen2.5vl` and
+`qwen2.5-coder:7b`, ~11 GB total) into a Docker volume, then starts the backend
+on `http://127.0.0.1:8010`. Subsequent runs are instant. It's ready when the
+health check reports `healthy`:
 
 ```bash
 curl -s http://127.0.0.1:8010/v1/healthz | python -m json.tool   # "status": "healthy"
@@ -64,7 +66,12 @@ not published), so it never clashes with a native Ollama you may already run on
 >
 > **macOS / no GPU:** Docker runs the models on **CPU**, so the vision model is
 > slow. **NVIDIA GPU on Linux:** uncomment the `deploy:` block on the `ollama`
-> service in `docker-compose.yml` for acceleration.
+> service in `docker-compose.override.yml` for acceleration.
+>
+> To run only the backend container against a native/external model server, use
+> `docker compose -f docker-compose.yml up`. The base compose file defaults to
+> native Ollama on `http://host.docker.internal:11434`; override `VLM_URL` and
+> `CODER_URL` for another server.
 
 ### Run your first analysis (curl)
 

@@ -150,6 +150,10 @@ This brings up three services with **no manual steps**:
 3. `backend` — the Framesleuth API on `http://127.0.0.1:8010`, started only once
    the models are ready (`depends_on: service_completed_successfully`).
 
+The Ollama pieces live in `docker-compose.override.yml`, which Docker Compose
+loads automatically. The base `docker-compose.yml` is backend-only for users who
+want to point the API container at native or external model servers.
+
 ```bash
 curl -s http://127.0.0.1:8010/v1/healthz | python -m json.tool   # status: healthy
 docker compose logs -f                  # watch the model download / startup
@@ -164,7 +168,16 @@ prefer **Option B** below — it reuses them instead of downloading a second cop
 It's **CPU-only** under Docker (incl. Docker on macOS, which can't use the Mac
 GPU), so the vision model is slow there — for speed on macOS use **Option B**
 (native Ollama). For an **NVIDIA GPU** on Linux, uncomment the `deploy:` block on
-the `ollama` service in `docker-compose.yml`.
+the `ollama` service in `docker-compose.override.yml`.
+
+To run only the backend container against native Ollama:
+
+```bash
+docker compose -f docker-compose.yml up
+```
+
+The base compose file defaults to `http://host.docker.internal:11434` for both
+model endpoints; set `VLM_URL` and `CODER_URL` if your server lives elsewhere.
 
 ### Option B: Run it directly (fastest on macOS, best for development)
 
